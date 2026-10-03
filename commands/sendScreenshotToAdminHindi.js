@@ -1,0 +1,68 @@
+/*CMD
+  command: sendScreenshotToAdminHindi
+  help: 
+  need_reply: true
+  auto_retry_time: 
+  folder: 
+  answer: 
+  keyboard: 
+  aliases: 
+  group: 
+CMD*/
+
+/*CMD
+command: sendScreenshotToAdminhindi
+need_reply: true
+*/
+
+let admin = Bot.getProperty("admin");
+
+// Only process photo
+if (!request.photo) {
+  return;
+}
+
+let file_id = request.photo[request.photo.length - 1].file_id;
+
+// get saved amount
+let amount = User.getProperty("add_amount") || 0;
+
+// full name
+let name = user.first_name + (user.last_name ? " " + user.last_name : "");
+
+// buttons
+let buttons = [
+  [
+    { text: "✅ Approve", callback_data: "/approve " + user.telegramid + " " + amount },
+    { text: "❌ Reject", callback_data: "/rej " + user.telegramid }
+  ]
+];
+
+// send to admin
+Api.sendPhoto({
+  chat_id: admin,
+  photo: file_id,
+  parse_mode: "HTML",
+  caption:
+    "📢 <b>New Payment Request</b>\n\n" +
+    "👤 Name: " + name +
+    "\n📛 Username: @" + (user.username || "NoUsername") +
+    "\n🆔 User ID: <code>" + user.telegramid + "</code>" +
+    "\n💰 Requested Amount: ₹" + amount +
+
+    "\n\n⚡ <b>Manual Shortcut:</b>\n" +
+    "<code>/addbalance " + user.telegramid + " AMOUNT</code>\n" +
+    "Use this if user paid different amount.",
+    
+  reply_markup: { inline_keyboard: buttons }
+});
+
+// user confirmation message
+Bot.sendMessage(
+  "✅ धन्यवाद!\n\n" +
+  "आपका भुगतान स्क्रीनशॉट एडमिन को भेज दिया गया है।\n" +
+  "🔍 सत्यापन के बाद आपका बैलेंस अपडेट कर दिया जाएगा।"
+);
+
+// redirect
+Bot.runCommand("/st");

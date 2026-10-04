@@ -16,6 +16,6 @@ module.exports = async (req, res) => {
       res.status(500).send('Error handling update');
     }
   } else {
-    res.status(200).send('Telegram Bot is running on Vercel Webhook!');
+    res.status(200).send('Telegram Bot is running on!');
   }
 };

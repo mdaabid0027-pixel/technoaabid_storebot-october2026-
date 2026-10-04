@@ -2,7 +2,7 @@ const { Telegraf } = require('telegraf');
 
 const bot = new Telegraf(process.env.BOT_TOKEN || '7956903949:AAF8aaevYHXxAvId6tuJfiZ2oGYGM1ggTiY');
 
-bot.start((ctx) => ctx.reply('Hello! Bot is working live on Vercel.'));
+bot.start((ctx) => ctx.reply('Hello! Bot is working live on.'));
 bot.help((ctx) => ctx.reply('Send /start to test.'));
 
 // Vercel Serverless Webhook Handler

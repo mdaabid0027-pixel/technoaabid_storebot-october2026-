@@ -1,211 +1,116 @@
-
 import { Telegraf, Markup } from "telegraf";
+import { createClient } from "@supabase/supabase-js";
 
-const bot = new Telegraf(process.env.BOT_TOKEN);
-
-// Demo storage only. Use Supabase for permanent data.
-const db = new Map();
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const ADMIN_ID = String(process.env.ADMIN_ID || "5006281199");
+const START_NOTIFY_ID = String(process.env.START_NOTIFY_ID || "8519564658");
+const bot = BOT_TOKEN ? new Telegraf(BOT_TOKEN) : null;
+const db = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
+  : null;
 
 const ENGINES = {
-  snake: {
-    name: "🐍 Snake Engine",
-    games: ["8 Ball Pool", "Carrom", "Soccer"],
-    durations: ["3 Days", "10 Days", "30 Days", "90 Days"],
-  },
-  kos: {
-    name: "🚀 Kos Engine",
-    games: ["8 Ball Pool", "Carrom"],
-    durations: ["1 Day", "7 Days", "15 Days", "30 Days"],
-  },
-  aimai: {
-    name: "🎯 AimAI Engine",
-    games: ["8 Ball Pool", "Carrom"],
-    durations: ["1 Day", "3 Days", "7 Days", "15 Days", "30 Days", "90 Days"],
-  },
-  shinigami: {
-    name: "👹 Shinigami",
-    games: ["Carrom"],
-    durations: ["1 Day", "3 Days", "7 Days", "15 Days", "30 Days", "90 Days"],
-  },
+  snake: { name: "🐍 Snake Engine", games: [{label:"8 Ball Pool",key:"8bp"},{label:"Carrom",key:"carrom"},{label:"Soccer",key:"soccer"}], days:[3,10,30,90] },
+  kos: { name: "🚀 Kos Engine", games: [{label:"8 Ball Pool",key:"8bp"},{label:"Carrom",key:"carrom"}], days:[1,7,15,30] },
+  aimai: { name: "🎯 AimAI Engine", games: [{label:"8 Ball Pool",key:"8bp"},{label:"Carrom",key:"carrom"}], days:[1,3,7,15,30,90] },
+  shinigami: { name: "👹 Shinigami", games: [{label:"Carrom",key:"carrom"}], days:[1,3,7,15,30,90] },
 };
+const MAIN_MENU = Markup.inlineKeyboard([
+  [{text:"🛒 Purchase Product",callback_data:"menu:purchase"}],
+  [{text:"💳 Check Balance",callback_data:"menu:balance"},{text:"➕ Add Balance",callback_data:"menu:topup"}],
+  [{text:"📦 Check Stock",callback_data:"menu:stock"},{text:"🧾 Purchase History",callback_data:"menu:history"}],
+  [{text:"💰 Price List",callback_data:"menu:prices"},{text:"🧾 Proof",callback_data:"menu:proof"}],
+  [{text:"📞 Support",callback_data:"menu:support"}],
+]);
+const ADMIN_MENU = Markup.inlineKeyboard([
+  [{text:"📦 Add Stock",callback_data:"admin:addstock"},{text:"💰 Set Price",callback_data:"admin:setprice"}],
+  [{text:"📊 Stock Overview",callback_data:"admin:stock"},{text:"👥 Users",callback_data:"admin:users"}],
+  [{text:"💳 Top-up Requests",callback_data:"admin:topups"},{text:"👑 Resellers",callback_data:"admin:resellers"}],
+  [{text:"📣 Broadcast",callback_data:"admin:broadcast"}],
+  [{text:"🔔 Start Notifications",callback_data:"admin:notify"}],
+  [{text:"🔗 Proof Channel",callback_data:"admin:proofchannel"},{text:"📈 Statistics",callback_data:"admin:stats"}],
+  [{text:"⚙️ Store Settings",callback_data:"admin:settings"}],
+  [{text:"⬅️ Main Menu",callback_data:"menu:home"}],
+]);
 
-function getBalance(uid) {
-  return Number(db.get(`${uid}_balance`) || 0);
+function escapeHTML(v="") { return String(v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+function requireDb(ctx) { if (!db) { ctx.reply("⚠️ Database is not configured yet. Admin: set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel Environment Variables.").catch(()=>{}); return false; } return true; }
+function isAdmin(ctx) { return String(ctx.from?.id) === ADMIN_ID; }
+async function getSetting(key, fallback=null) { const {data,error}=await db.from("store_settings").select("value").eq("key",key).maybeSingle(); if(error) throw error; return data ? data.value : fallback; }
+async function setSetting(key,value) { const {error}=await db.from("store_settings").upsert({key,value,updated_at:new Date().toISOString()},{onConflict:"key"}); if(error) throw error; }
+async function setState(uid,state) { const {error}=await db.from("store_user_states").upsert({telegram_id:String(uid),state,updated_at:new Date().toISOString()},{onConflict:"telegram_id"}); if(error) throw error; }
+async function getState(uid) { const {data,error}=await db.from("store_user_states").select("state").eq("telegram_id",String(uid)).maybeSingle(); if(error) throw error; return data?.state || null; }
+async function clearState(uid) { const {error}=await db.from("store_user_states").delete().eq("telegram_id",String(uid)); if(error) throw error; }
+async function ensureUser(from) { const uid=String(from.id); const full=[from.first_name||"User",from.last_name||""].filter(Boolean).join(" "); const {error}=await db.from("store_users").upsert({telegram_id:uid,full_name:full,username:from.username||null},{onConflict:"telegram_id",ignoreDuplicates:false}); if(error) throw error; const {data,error:e}=await db.from("store_users").select("balance,role").eq("telegram_id",uid).single(); if(e) throw e; return data; }
+async function userBalance(uid) { const {data,error}=await db.from("store_users").select("balance").eq("telegram_id",String(uid)).maybeSingle(); if(error) throw error; return Number(data?.balance||0); }
+async function productsFor(engine=null,game=null) { let q=db.from("store_products").select("id,engine,game,duration_days,price,active,download_url").eq("active",true).order("engine").order("game").order("duration_days"); if(engine) q=q.eq("engine",engine); if(game) q=q.eq("game",game); const {data,error}=await q; if(error) throw error; return data||[]; }
+async function stockCount(productId) { const {count,error}=await db.from("store_stock").select("id",{count:"exact",head:true}).eq("product_id",productId).is("sold_to",null); if(error) throw error; return count||0; }
+async function sendHome(ctx, edit=false) { const text="✨ <b>TECHNO AABID STORE</b> ✨\n\nSelect an option below."; if(edit && ctx.callbackQuery) return ctx.editMessageText(text,{parse_mode:"HTML",...MAIN_MENU}).catch(()=>ctx.replyWithHTML(text,MAIN_MENU)); return ctx.replyWithHTML(text,MAIN_MENU); }
+async function safeAdminNotify(text) { try { await bot.telegram.sendMessage(ADMIN_ID,text,{parse_mode:"HTML"}); } catch(e) { console.error("Admin notify failed",e.message); } }
+async function sendEngineMenu(ctx,edit=false) { const buttons=Object.entries(ENGINES).map(([k,v])=>[{text:v.name,callback_data:`engine:${k}`}]); buttons.push([{text:"⬅️ Main Menu",callback_data:"menu:home"}]); const opts={parse_mode:"HTML",...Markup.inlineKeyboard(buttons)}; const text="🛒 <b>Select Engine</b>"; if(edit) return ctx.editMessageText(text,opts).catch(()=>ctx.replyWithHTML(text,Markup.inlineKeyboard(buttons))); return ctx.replyWithHTML(text,Markup.inlineKeyboard(buttons)); }
+async function renderProducts(ctx,engine,game,edit=false) { const products=await productsFor(engine,game); if(!products.length) { const t="No active products/prices configured yet. Please check back later."; return edit?ctx.editMessageText(t).catch(()=>ctx.reply(t)):ctx.reply(t); } const buttons=[]; for(const p of products) { const count=await stockCount(p.id); buttons.push([{text:`${p.duration_days} day(s) · ₹${Number(p.price).toFixed(2)} · Stock ${count}`,callback_data:`product:${p.id}`}]); } buttons.push([{text:"⬅️ Back",callback_data:`engine:${engine}`}]); const title=`${ENGINES[engine]?.name||engine} · ${game}`; if(edit) return ctx.editMessageText(title,{...Markup.inlineKeyboard(buttons)}).catch(()=>ctx.reply(title,Markup.inlineKeyboard(buttons))); return ctx.reply(title,Markup.inlineKeyboard(buttons)); }
+
+if (bot) {
+  bot.start(async (ctx)=>{ try { if(!requireDb(ctx)) return; const before=await db.from("store_users").select("telegram_id").eq("telegram_id",String(ctx.from.id)).maybeSingle(); await ensureUser(ctx.from); const notify=await getSetting("start_notifications",true); if(!before.data && notify) { try { await bot.telegram.sendMessage(START_NOTIFY_ID,`🆕 <b>New user started the bot</b>\nName: ${escapeHTML(ctx.from.first_name||"User")}\nUsername: ${ctx.from.username?"@"+escapeHTML(ctx.from.username):"—"}\nID: <code>${ctx.from.id}</code>`,{parse_mode:"HTML"}); } catch(e) { console.error("Start notification failed",e.message); } } const bal=await userBalance(ctx.from.id); await ctx.replyWithHTML(`✨ <b>WELCOME TO TECHNO AABID STORE</b> ✨\n\n👤 Name: ${escapeHTML(ctx.from.first_name||"User")}\n🆔 ID: <code>${ctx.from.id}</code>\n💰 Balance: ₹${bal.toFixed(2)}\n\nChoose an option below.`,MAIN_MENU); } catch(e) { console.error(e); await ctx.reply("Temporary error. Please try again later."); } });
+  bot.command("admin",async ctx=>{ if(!isAdmin(ctx)) return ctx.reply("⛔ Admin only."); if(!requireDb(ctx)) return; await ctx.replyWithHTML("👑 <b>TECHNO AABID ADMIN PANEL</b>",ADMIN_MENU); });
+  bot.command("cancel",async ctx=>{ if(!requireDb(ctx)) return; await clearState(ctx.from.id); await ctx.reply("Cancelled.",MAIN_MENU); });
+  bot.command("proof",async ctx=>{ if(!requireDb(ctx)) return; const channel=await getSetting("proof_channel",""); if(!channel) return ctx.reply("🧾 Proof / channel verification is not configured yet."); await ctx.reply("Please join the required channel, then tap Verify.",Markup.inlineKeyboard([[{text:"📢 Join Channel",url:channel.startsWith("https://t.me/")?channel:`https://t.me/${channel.replace(/^@/,"")}`}],[{text:"✅ Verify",callback_data:"proof:verify"}]])); });
+
+  bot.action("menu:home",async ctx=>{await ctx.answerCbQuery();await sendHome(ctx,true);});
+  bot.action("menu:purchase",async ctx=>{await ctx.answerCbQuery();await sendEngineMenu(ctx,true);});
+  bot.action("menu:balance",async ctx=>{await ctx.answerCbQuery();if(!requireDb(ctx))return;await ensureUser(ctx.from);await ctx.reply(`💰 Your balance: ₹${(await userBalance(ctx.from.id)).toFixed(2)}`);});
+  bot.action("menu:topup",async ctx=>{await ctx.answerCbQuery();if(!requireDb(ctx))return;await setState(ctx.from.id,{type:"topup_amount"});await ctx.reply("Enter top-up amount in ₹ (example: 100). Send /cancel to stop.");});
+  bot.action("menu:stock",async ctx=>{await ctx.answerCbQuery();if(!requireDb(ctx))return;const ps=await productsFor();if(!ps.length)return ctx.reply("No products configured yet.");let lines=[];for(const p of ps){lines.push(`${p.engine} · ${p.game} · ${p.duration_days} days — ₹${Number(p.price).toFixed(2)} (stock ${await stockCount(p.id)})`);}await ctx.reply("📦 <b>Available Stock</b>\n\n"+lines.join("\n"),{parse_mode:"HTML"});});
+  bot.action("menu:history",async ctx=>{await ctx.answerCbQuery();if(!requireDb(ctx))return;const {data,error}=await db.from("store_purchases").select("id,product_id,quantity,total_price,status,created_at,store_products(engine,game,duration_days)").eq("telegram_id",String(ctx.from.id)).order("created_at",{ascending:false}).limit(10);if(error)throw error;if(!data?.length)return ctx.reply("🧾 No purchases yet.");const lines=data.map(p=>`#${p.id} · ${p.store_products?.engine||"Product"} / ${p.store_products?.game||""} / ${p.store_products?.duration_days||""}d · Qty ${p.quantity} · ₹${p.total_price} · ${p.status}`);await ctx.reply("🧾 Recent purchases\n\n"+lines.join("\n"));});
+  bot.action("menu:prices",async ctx=>{await ctx.answerCbQuery();if(!requireDb(ctx))return;const ps=await productsFor();if(!ps.length)return ctx.reply("No prices configured yet.");await ctx.reply("💰 <b>Price List</b>\n\n"+ps.map(p=>`${p.engine} · ${p.game} · ${p.duration_days} days: ₹${Number(p.price).toFixed(2)}`).join("\n"),{parse_mode:"HTML"});});
+  bot.action("menu:proof",async ctx=>{await ctx.answerCbQuery();const channel=await getSetting("proof_channel","");if(!channel)return ctx.reply("🧾 Proof channel is not configured yet.");await ctx.reply("Join the proof channel and verify membership.",Markup.inlineKeyboard([[{text:"📢 Join Channel",url:channel.startsWith("https://t.me/")?channel:`https://t.me/${channel.replace(/^@/,"")}`}],[{text:"✅ Verify",callback_data:"proof:verify"}]]));});
+  bot.action("menu:support",async ctx=>{await ctx.answerCbQuery();const contact=await getSetting("support_contact","");await ctx.reply(contact?`📞 Support: ${escapeHTML(contact)}`:"📞 Support contact is not configured yet.");});
+
+  bot.action(/^engine:(snake|kos|aimai|shinigami)$/,async ctx=>{await ctx.answerCbQuery();const e=ctx.match[1];const games=ENGINES[e].games.map(g=>[{text:g.label,callback_data:`game:${e}:${g.key}`}]);games.push([{text:"⬅️ Engines",callback_data:"menu:purchase"}]);await ctx.editMessageText(`${ENGINES[e].name}\n\nSelect game:`,Markup.inlineKeyboard(games)).catch(()=>ctx.reply(`${ENGINES[e].name}\n\nSelect game:`,Markup.inlineKeyboard(games)));});
+  bot.action(/^game:(snake|kos|aimai|shinigami):(8bp|carrom|soccer)$/,async ctx=>{await ctx.answerCbQuery();await renderProducts(ctx,ctx.match[1],ctx.match[2],true);});
+  bot.action(/^product:(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!requireDb(ctx))return;const id=Number(ctx.match[1]);const {data:p,error}=await db.from("store_products").select("id,engine,game,duration_days,price,active").eq("id",id).eq("active",true).maybeSingle();if(error)throw error;if(!p)return ctx.reply("Product unavailable.");const stock=await stockCount(id);if(stock<1)return ctx.reply("❌ Out of stock. Please contact the store admin.");await ctx.replyWithHTML(`<b>Confirm Purchase</b>\n\nProduct: ${escapeHTML(p.engine)}\nGame: ${escapeHTML(p.game)}\nDuration: ${p.duration_days} days\nPrice: ₹${Number(p.price).toFixed(2)}\nYour balance: ₹${(await userBalance(ctx.from.id)).toFixed(2)}`,Markup.inlineKeyboard([[{text:"✅ Confirm Purchase",callback_data:`buy:${id}`}],[{text:"❌ Cancel",callback_data:"menu:purchase"}]]));});
+  bot.action(/^buy:(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!requireDb(ctx))return;const {data,error}=await db.rpc("store_purchase_one",{p_telegram_id:String(ctx.from.id),p_product_id:Number(ctx.match[1])});if(error){console.error("Purchase RPC failed",error.message);return ctx.reply("❌ Purchase could not be completed. Check balance/stock and try again.");}const result=Array.isArray(data)?data[0]:data;if(!result?.ok)return ctx.reply(result?.message||"❌ Purchase failed.");await ctx.replyWithHTML(`🎉 <b>Purchase successful!</b>\n\nProduct: ${escapeHTML(result.engine)}\nGame: ${escapeHTML(result.game)}\nDuration: ${result.duration_days} days\nPaid: ₹${Number(result.total_price).toFixed(2)}\nRemaining balance: ₹${Number(result.balance).toFixed(2)}\n\n🔑 <code>${escapeHTML(result.license_key)}</code>\n\nSave your key privately.`);await safeAdminNotify(`🛒 <b>Purchase</b>\nUser: <code>${ctx.from.id}</code>\nProduct: ${escapeHTML(result.engine)} / ${escapeHTML(result.game)} / ${result.duration_days}d\nAmount: ₹${result.total_price}`);});
+  bot.action("proof:verify",async ctx=>{await ctx.answerCbQuery();const channel=await getSetting("proof_channel","");if(!channel)return ctx.reply("Proof channel is not configured.");try{const member=await bot.telegram.getChatMember(channel.startsWith("https://t.me/")?channel:channel,ctx.from.id);if(["member","administrator","creator"].includes(member.status))return ctx.reply("✅ Channel membership verified.");return ctx.reply("❌ Please join the channel first.");}catch(e){return ctx.reply("Unable to verify. Admin should configure the channel as @username or a chat ID and make sure the bot can check members.");}});
+
+  // Admin actions — all callback data is protected by main admin ID.
+  bot.action(/^admin:(panel|notify|addstock|setprice|stock|users|topups|resellers|broadcast|proofchannel|stats|settings|support)$/,async ctx=>{await ctx.answerCbQuery();if(!isAdmin(ctx))return ctx.reply("⛔ Admin only.");if(!requireDb(ctx))return;const action=ctx.match[0].slice(6);
+    if(action==="notify"){const current=await getSetting("start_notifications",true);await setSetting("start_notifications",!current);return ctx.reply(`🔔 Start notifications are now ${!current?"ON":"OFF"}.`,Markup.inlineKeyboard([[{text:"⬅️ Admin Panel",callback_data:"admin:panel"}]]));}
+    if(action==="panel")return ctx.replyWithHTML("👑 <b>ADMIN PANEL</b>",ADMIN_MENU);
+    if(action==="addstock"){await setState(ctx.from.id,{type:"addstock_engine"});return ctx.reply("Select engine for stock:",Markup.inlineKeyboard(Object.entries(ENGINES).map(([k,v])=>[{text:v.name,callback_data:`admin:stockengine:${k}`}])));}
+    if(action==="setprice"){await setState(ctx.from.id,{type:"setprice_engine"});return ctx.reply("Select engine to set price:",Markup.inlineKeyboard(Object.entries(ENGINES).map(([k,v])=>[{text:v.name,callback_data:`admin:priceengine:${k}`}])));}
+    if(action==="stock"){const ps=await productsFor();if(!ps.length)return ctx.reply("No products configured.");const lines=[];for(const p of ps)lines.push(`${p.engine}/${p.game}/${p.duration_days}d: ${await stockCount(p.id)} keys · ₹${p.price}`);return ctx.reply("📦 Stock overview\n\n"+lines.join("\n"));}
+    if(action==="users"){const {count,error}=await db.from("store_users").select("telegram_id",{count:"exact",head:true});if(error)throw error;return ctx.reply(`👥 Registered users: ${count||0}`);}
+    if(action==="topups"){const {data,error}=await db.from("store_topups").select("id,telegram_id,amount,created_at").eq("status","pending").order("created_at",{ascending:true}).limit(15);if(error)throw error;if(!data?.length)return ctx.reply("No pending top-ups.");for(const t of data)await ctx.reply(`Top-up #${t.id}\nUser: ${t.telegram_id}\nAmount: ₹${t.amount}`,Markup.inlineKeyboard([[{text:"✅ Approve",callback_data:`admin:approve:${t.id}`},{text:"❌ Reject",callback_data:`admin:reject:${t.id}`}]]));return;}
+    if(action==="resellers"){const {data,error}=await db.from("store_users").select("telegram_id,full_name,username").eq("role","reseller").limit(50);if(error)throw error;return ctx.reply(data?.length?"👑 Resellers\n\n"+data.map(u=>`${u.full_name||"User"} · ${u.telegram_id}`).join("\n"):"No resellers yet.");}
+    if(action==="broadcast"){await setState(ctx.from.id,{type:"broadcast"});return ctx.reply("Send the message to broadcast to all registered users. Send /cancel to stop.");}
+    if(action==="proofchannel"){await setState(ctx.from.id,{type:"proof_channel"});return ctx.reply("Send proof channel @username or https://t.me/... . This setting is used only by the Proof command.");}
+    if(action==="stats"){const [{count:users},{count:orders},{data:sumRows}]=await Promise.all([db.from("store_users").select("telegram_id",{count:"exact",head:true}),db.from("store_purchases").select("id",{count:"exact",head:true}),db.from("store_purchases").select("total_price").eq("status","completed")]);const total=(sumRows||[]).reduce((n,r)=>n+Number(r.total_price||0),0);return ctx.reply(`📈 Statistics\nUsers: ${users||0}\nPurchases: ${orders||0}\nGross sales (returned rows): ₹${total.toFixed(2)}`);}
+    if(action==="settings")return ctx.reply("⚙️ Settings",Markup.inlineKeyboard([[{text:"🔔 Toggle start notify",callback_data:"admin:notify"}],[{text:"📢 Set proof channel",callback_data:"admin:proofchannel"}],[{text:"📞 Set support contact",callback_data:"admin:support"}],[{text:"⬅️ Admin Panel",callback_data:"admin:panel"}]]));
+    if(action==="support"){await setState(ctx.from.id,{type:"support_contact"});return ctx.reply("Send support username/link/contact text.");}
+  });
+  bot.action(/^admin:(stockengine|priceengine):([a-z]+)$/,async ctx=>{await ctx.answerCbQuery();if(!isAdmin(ctx))return ctx.reply("⛔ Admin only.");const type=ctx.match[1]==="stockengine"?"addstock_game":"setprice_game";await setState(ctx.from.id,{type,engine:ctx.match[2]});const games=ENGINES[ctx.match[2]].games.map(g=>[{text:g.label,callback_data:`admin:${ctx.match[1]==="stockengine"?"stockgame":"pricegame"}:${ctx.match[2]}:${g.key}`}]);return ctx.reply("Select game:",Markup.inlineKeyboard(games));});
+  bot.action(/^admin:(stockgame|pricegame):([a-z]+):(8bp|carrom|soccer)$/,async ctx=>{await ctx.answerCbQuery();if(!isAdmin(ctx))return ctx.reply("⛔ Admin only.");const mode=ctx.match[1]==="stockgame"?"addstock":"setprice";const state={type:mode+"_duration",engine:ctx.match[2],game:ctx.match[3]};await setState(ctx.from.id,state);const days=ENGINES[state.engine].days;return ctx.reply("Select duration:",Markup.inlineKeyboard(days.map(d=>[{text:`${d} days`,callback_data:`admin:${mode}day:${state.engine}:${state.game}:${d}`}])));});
+  bot.action(/^admin:(addstock|setpriceday):([a-z]+):(8bp|carrom|soccer):(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!isAdmin(ctx))return ctx.reply("⛔ Admin only.");const mode=ctx.match[1]==="addstock"?"addstock_keys":"setprice_value";await setState(ctx.from.id,{type:mode,engine:ctx.match[2],game:ctx.match[3],days:Number(ctx.match[4])});return ctx.reply(mode==="addstock_keys"?"Send license keys, one per line. Keys will be saved privately in Supabase.":"Send the normal customer price in ₹ (number only).");});
+  bot.action(/^admin:approve:(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!isAdmin(ctx))return ctx.reply("⛔ Admin only.");const {data,error}=await db.rpc("store_approve_topup",{p_topup_id:Number(ctx.match[1]),p_admin_id:ADMIN_ID});if(error)throw error;const r=Array.isArray(data)?data[0]:data;await ctx.reply(r?.message||"Top-up processed.");if(r?.ok)try{await bot.telegram.sendMessage(r.telegram_id,`✅ Your top-up of ₹${r.amount} has been approved.`);}catch{} });
+  bot.action(/^admin:reject:(\d+)$/,async ctx=>{await ctx.answerCbQuery();if(!isAdmin(ctx))return ctx.reply("⛔ Admin only.");const {error}=await db.from("store_topups").update({status:"rejected"}).eq("id",Number(ctx.match[1])).eq("status","pending");if(error)throw error;await ctx.reply("Top-up rejected.");});
+
+  bot.on("text",async ctx=>{const text=ctx.message.text||"";if(text.startsWith("/"))return;if(!requireDb(ctx))return;const uid=String(ctx.from.id);const state=await getState(uid);if(!state)return;
+    if(state.type==="topup_amount"){const amount=Number(text);if(!Number.isFinite(amount)||amount<=0||amount>100000){return ctx.reply("Enter a valid amount between ₹1 and ₹100000.");}const {data,error}=await db.from("store_topups").insert({telegram_id:uid,amount,status:"pending"}).select("id").single();if(error)throw error;await clearState(uid);await ctx.reply(`✅ Top-up request #${data.id} for ₹${amount} created. Follow the store payment instructions and contact admin with proof.`);await safeAdminNotify(`💳 <b>Top-up request</b>\nRequest: #${data.id}\nUser: <code>${uid}</code>\nAmount: ₹${amount}`);return;}
+    if(!isAdmin(ctx)){await clearState(uid);return ctx.reply("This action is admin-only.");}
+    if(state.type==="proof_channel"){await setSetting("proof_channel",text.trim());await clearState(uid);return ctx.reply("✅ Proof channel saved. It is only used by the Proof command.");}
+    if(state.type==="support_contact"){await setSetting("support_contact",text.trim());await clearState(uid);return ctx.reply("✅ Support contact saved.");}
+    if(state.type==="broadcast"){const {data:users,error}=await db.from("store_users").select("telegram_id").limit(10000);if(error)throw error;await clearState(uid);let ok=0,failed=0;for(const u of users||[]){try{await bot.telegram.sendMessage(u.telegram_id,text);ok++;}catch{failed++;}}return ctx.reply(`📣 Broadcast finished. Sent: ${ok}, failed: ${failed}.`);}
+    if(state.type==="setprice_value"){const price=Number(text);if(!Number.isFinite(price)||price<=0||price>1000000)return ctx.reply("Send a valid price greater than 0.");const {error}=await db.from("store_products").upsert({engine:state.engine,game:state.game,duration_days:state.days,price,active:true},{onConflict:"engine,game,duration_days"});if(error)throw error;await clearState(uid);return ctx.reply(`✅ Price saved: ${state.engine}/${state.game}/${state.days}d = ₹${price}`);}
+    if(state.type==="addstock_keys"){const keys=[...new Set(text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean))];if(!keys.length||keys.length>500)return ctx.reply("Send 1–500 non-empty license keys, one per line.");let {data:product,error}=await db.from("store_products").select("id").eq("engine",state.engine).eq("game",state.game).eq("duration_days",state.days).maybeSingle();if(error)throw error;if(!product){const ins=await db.from("store_products").insert({engine:state.engine,game:state.game,duration_days:state.days,price:0,active:true}).select("id").single();if(ins.error)throw ins.error;product=ins.data;}const rows=keys.map(license_key=>({product_id:product.id,license_key}));const {error:se}=await db.from("store_stock").insert(rows);if(se)throw se;await clearState(uid);return ctx.reply(`✅ Added ${keys.length} keys to ${state.engine}/${state.game}/${state.days}d. Set the product price before selling.`);}
+  });
+  bot.catch((err)=>console.error("Telegraf error:",err.message));
 }
 
-function mainMenu() {
-  return Markup.keyboard([
-    ["🛒 Purchase Product"],
-    ["💳 Check Balance", "➕ Add Balance"],
-    ["📦 Check Stock", "🧾 Purchase History"],
-  ]).resize();
-}
-
-function engineMenu() {
-  return Markup.inlineKeyboard([
-    [{ text: "🐍 Snake Engine", callback_data: "engine_snake" }],
-    [{ text: "🚀 Kos Engine", callback_data: "engine_kos" }],
-    [{ text: "🎯 AimAI Engine", callback_data: "engine_aimai" }],
-    [{ text: "👹 Shinigami", callback_data: "engine_shinigami" }],
-  ]);
-}
-
-bot.start(async (ctx) => {
-  const uid = String(ctx.from.id);
-  const name = [
-    ctx.from.first_name || "User",
-    ctx.from.last_name || "",
-  ].filter(Boolean).join(" ");
-
-  const msg =
-    "✨ <b>WELCOME TO TECHNO AABID STORE</b> ✨\n\n" +
-    `👤 <b>Name:</b> ${escapeHTML(name)}\n` +
-    `🆔 <b>User ID:</b> <code>${uid}</code>\n` +
-    `💰 <b>Balance:</b> ₹${getBalance(uid).toFixed(2)}\n\n` +
-    "🚀 Select an option from the menu below.";
-
-  await ctx.replyWithHTML(msg, mainMenu());
-});
-
-bot.hears("💳 Check Balance", async (ctx) => {
-  await ctx.reply(
-    `💰 Your current balance: ₹${getBalance(String(ctx.from.id)).toFixed(2)}`
-  );
-});
-
-bot.hears("🛒 Purchase Product", async (ctx) => {
-  await ctx.replyWithHTML(
-    "<b>🛒 Select Your Engine</b>\n\nChoose an engine:",
-    engineMenu()
-  );
-});
-
-bot.action(/^engine_(snake|kos|aimai|shinigami)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-
-  const key = ctx.match[1];
-  const engine = ENGINES[key];
-  const uid = String(ctx.from.id);
-
-  db.set(`${uid}_engine`, key);
-
-  const buttons = engine.games.map((game, index) => [{
-    text: game,
-    callback_data: `game_${key}_${index}`,
-  }]);
-
-  buttons.push([{ text: "⬅️ Back to Engines", callback_data: "back_engines" }]);
-
-  await ctx.replyWithHTML(
-    `<b>${engine.name}</b>\n\n🎮 Select your game:`,
-    Markup.inlineKeyboard(buttons)
-  );
-});
-
-bot.action("back_engines", async (ctx) => {
-  await ctx.answerCbQuery();
-  await ctx.reply("🛒 Select an engine:", engineMenu());
-});
-
-bot.action(/^game_(snake|kos|aimai|shinigami)_(\d+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-
-  const key = ctx.match[1];
-  const index = Number(ctx.match[2]);
-  const engine = ENGINES[key];
-  const game = engine?.games[index];
-
-  if (!game) {
-    return ctx.reply("❌ Invalid game selection. Please try again.");
-  }
-
-  const uid = String(ctx.from.id);
-  db.set(`${uid}_engine`, key);
-  db.set(`${uid}_game`, game);
-
-  const buttons = engine.durations.map((duration, i) => [{
-    text: duration,
-    callback_data: `duration_${key}_${i}`,
-  }]);
-
-  buttons.push([{ text: "⬅️ Back to Games", callback_data: `engine_${key}` }]);
-
-  await ctx.replyWithHTML(
-    `🎮 <b>Game:</b> ${escapeHTML(game)}\n\n⏳ Select a plan:`,
-    Markup.inlineKeyboard(buttons)
-  );
-});
-
-bot.action(/^duration_(snake|kos|aimai|shinigami)_(\d+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-
-  const key = ctx.match[1];
-  const index = Number(ctx.match[2]);
-  const engine = ENGINES[key];
-  const duration = engine?.durations[index];
-
-  if (!duration) {
-    return ctx.reply("❌ Invalid plan selection. Please try again.");
-  }
-
-  const uid = String(ctx.from.id);
-  const game = db.get(`${uid}_game`) || "Not selected";
-
-  db.set(`${uid}_duration`, duration);
-
-  await ctx.replyWithHTML(
-    `✅ <b>Selection Saved</b>\n\n` +
-    `⚙️ Engine: ${engine.name}\n` +
-    `🎮 Game: ${escapeHTML(game)}\n` +
-    `⏳ Plan: ${escapeHTML(duration)}\n\n` +
-    "💡 Price and stock must be connected to your product database before checkout."
-  );
-});
-
-bot.hears("➕ Add Balance", async (ctx) => {
-  await ctx.reply(
-    "➕ Add Balance\n\nPayment request and verification are not connected yet. Contact the store admin for a top-up."
-  );
-});
-
-bot.hears("📦 Check Stock", async (ctx) => {
-  await ctx.reply(
-    "📦 Stock\n\nLive stock is not connected yet. Connect your product database to show available plans."
-  );
-});
-
-bot.hears("🧾 Purchase History", async (ctx) => {
-  const uid = String(ctx.from.id);
-  const history = db.get(`${uid}_history`) || [];
-
-  if (!history.length) {
-    return ctx.reply("🧾 No completed purchases found.");
-  }
-
-  await ctx.reply(
-    "🧾 Purchase History\n\n" +
-    history.map((item, i) => `${i + 1}. ${item}`).join("\n")
-  );
-});
-
-function escapeHTML(value) {
-  return String(value)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-// Vercel webhook handler
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(200).json({ status: "Bot endpoint is running" });
-  }
-
-  try {
-    await bot.handleUpdate(req.body);
-    return res.status(200).json({ ok: true });
-  } catch (error) {
-    console.error("Webhook error:", error.message);
-    return res.status(200).json({ ok: false });
-  }
+export default async function handler(req,res) {
+  if(req.method!=="POST") return res.status(200).json({status:"Techno Aabid Storebot webhook endpoint ready",databaseConfigured:Boolean(db),botConfigured:Boolean(bot)});
+  if(!bot) return res.status(500).json({ok:false,error:"BOT_TOKEN is not configured"});
+  try { await bot.handleUpdate(req.body); return res.status(200).json({ok:true}); }
+  catch(error) { console.error("Webhook processing error:",error.message); return res.status(200).json({ok:false}); }
 }

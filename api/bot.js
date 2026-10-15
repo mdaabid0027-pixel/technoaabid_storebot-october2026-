@@ -6,26 +6,39 @@ const missing = required.filter((k) => !process.env[k]);
 if (missing.length) throw new Error(`Missing environment variables: ${missing.join(', ')}`);
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// Telegram Bot API 9.4+ supports style on INLINE keyboard buttons only.
-// Reply-keyboard buttons do not support custom background colours.
+// Apply Telegram Bot API button styles globally without changing callback data or business logic.
+// Supported styles: success (green), primary (blue), danger (red).
 function buttonStyle(text) {
   const t = String(text || '').toLowerCase();
-  if (/cancel|reject|delete|remove|ban|❌|🗑/.test(t)) return 'danger';
-  if (/yes,? purchase|confirm purchase|approve|add balance|all stock|save|submit|pay now|✅|🟩/.test(t)) return 'success';
+  if (/cancel|reject|delete|remove|ban|deny|❌/.test(t)) return 'danger';
+  if (/yes, purchase|approve|credit|confirm|save|add balance|all stock|✅|📦/.test(t)) return 'success';
+  if (/snake engine/.test(t)) return 'success';
+  if (/shinigami/.test(t)) return 'danger';
+  // Engine/game choices, navigation, quantities and ordinary actions use blue.
   return 'primary';
 }
-function applyInlineButtonStyles(markup) {
-  if (!markup || typeof markup !== 'object' || !Array.isArray(markup.inline_keyboard)) return markup;
-  const result = structuredClone(markup);
-  result.inline_keyboard = result.inline_keyboard.map(row => row.map(button => {
-    if (!button || typeof button !== 'object' || !button.text) return button;
-    return { ...button, style: button.style || buttonStyle(button.text) };
-  }));
-  return result;
+function styleReplyMarkup(markup) {
+  if (!markup || typeof markup !== 'object') return markup;
+  if (Array.isArray(markup.inline_keyboard)) {
+    markup.inline_keyboard = markup.inline_keyboard.map(row => row.map(button => {
+      if (!button || typeof button !== 'object') return button;
+      return { ...button, style: button.style || buttonStyle(button.text) };
+    }));
+  }
+  if (Array.isArray(markup.keyboard)) {
+    markup.keyboard = markup.keyboard.map(row => row.map(button => {
+      if (typeof button === 'string') return { text: button, style: buttonStyle(button) };
+      if (!button || typeof button !== 'object') return button;
+      return { ...button, style: button.style || buttonStyle(button.text) };
+    }));
+  }
+  return markup;
 }
 const originalCallApi = bot.telegram.callApi.bind(bot.telegram);
-bot.telegram.callApi = (method, payload, signal) => {
-  if (payload?.reply_markup?.inline_keyboard) payload.reply_markup = applyInlineButtonStyles(payload.reply_markup);
+bot.telegram.callApi = (method, payload = {}, signal) => {
+  if (payload && payload.reply_markup) {
+    payload = { ...payload, reply_markup: styleReplyMarkup({ ...payload.reply_markup }) };
+  }
   return originalCallApi(method, payload, signal);
 };
 const db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
@@ -272,7 +285,7 @@ bot.action(/^(buy|stock|price|reseller)day:(snake|kos|aimai|shinigami):([^:]+):(
     await ctx.reply(`${ENGINES[engine].name}\n🎮 ${game}\n⏳ ${days} days\n💵 Unit price: ${money(unitPrice)}\n📦 Available stock: ${count}\n\nQuantity choose karein:`, resellerQuantityKeyboard(count));
   } else {
     sessions.set(key(ctx.from.id), { flow:'confirm_purchase', engine, game, days, productId:product.id, price:unitPrice, qty:1, total:Number(unitPrice.toFixed(2)) });
-    await ctx.reply(`Confirm purchase?\n${ENGINES[engine].name}\n🎮 ${game} • ${days} days\nQuantity: 1 key\nPrice: ${money(unitPrice)}\nYour balance: ${money(user.balance)}\nBalance after purchase: ${money(Number(user.balance)-unitPrice)}`, Markup.inlineKeyboard([[Markup.button.callback('🟩 ✅ Yes, Purchase','purchase_confirm'),Markup.button.callback('🟥 ❌ Cancel Purchase','purchase_cancel')]]));
+    await ctx.reply(`Confirm purchase?\n${ENGINES[engine].name}\n🎮 ${game} • ${days} days\nQuantity: 1 key\nPrice: ${money(unitPrice)}\nYour balance: ${money(user.balance)}\nBalance after purchase: ${money(Number(user.balance)-unitPrice)}`, Markup.inlineKeyboard([[Markup.button.callback('✅ Yes, Purchase','purchase_confirm'),Markup.button.callback('❌ Cancel Purchase','purchase_cancel')]]));
   }
 });
 bot.action(/^qty:(all|[1-9]|10)$/, async ctx => {
@@ -286,7 +299,7 @@ bot.action(/^qty:(all|[1-9]|10)$/, async ctx => {
     const user=await ensureUser(ctx); const total=Number((Number(s.price)*qty).toFixed(2));
     if (Number(user.balance)<total) { sessions.delete(uid); return ctx.reply(`Insufficient balance. Total ${money(total)}, balance ${money(user.balance)}. Please Add Balance first.`,HOME); }
     sessions.set(uid,{...s,flow:'confirm_purchase',qty,total});
-    return ctx.reply(`Confirm reseller purchase?\n${ENGINES[s.engine].name}\n${s.game} • ${s.days} days\nQuantity: ${qty}${ctx.match[1]==='all'?' (all available stock)':''}\nTotal: ${money(total)}\nBalance after purchase: ${money(Number(user.balance)-total)}`,Markup.inlineKeyboard([[Markup.button.callback('🟩 ✅ Yes, Purchase','purchase_confirm'),Markup.button.callback('🟥 ❌ Cancel Purchase','purchase_cancel')]]));
+    return ctx.reply(`Confirm reseller purchase?\n${ENGINES[s.engine].name}\n${s.game} • ${s.days} days\nQuantity: ${qty}${ctx.match[1]==='all'?' (all available stock)':''}\nTotal: ${money(total)}\nBalance after purchase: ${money(Number(user.balance)-total)}`,Markup.inlineKeyboard([[Markup.button.callback('✅ Yes, Purchase','purchase_confirm'),Markup.button.callback('❌ Cancel Purchase','purchase_cancel')]]));
   } catch(e) { console.error(e); return ctx.reply('Could not check quantity. Try again.'); }
 });
 
@@ -354,7 +367,7 @@ bot.on('text', async (ctx, next) => {
         return ctx.reply(`${ENGINES[s.engine].name}\n🎮 ${s.game} • ${days} days\nUnit price: ${money(price)}\nAvailable: ${count}\nChoose quantity:`,resellerQuantityKeyboard(count));
       }
       sessions.set(uid,{flow:'confirm_purchase',engine:s.engine,game:s.game,days,productId:product.id,price,qty:1,total:Number(price.toFixed(2))});
-      return ctx.reply(`Confirm purchase?\n${ENGINES[s.engine].name}\n${s.game} • ${days} days\nQuantity: 1\nPrice: ${money(price)}\nBalance: ${money(user.balance)}`,Markup.inlineKeyboard([[Markup.button.callback('🟩 ✅ Yes, Purchase','purchase_confirm'),Markup.button.callback('🟥 ❌ Cancel Purchase','purchase_cancel')]]));
+      return ctx.reply(`Confirm purchase?\n${ENGINES[s.engine].name}\n${s.game} • ${days} days\nQuantity: 1\nPrice: ${money(price)}\nBalance: ${money(user.balance)}`,Markup.inlineKeyboard([[Markup.button.callback('✅ Yes, Purchase','purchase_confirm'),Markup.button.callback('❌ Cancel Purchase','purchase_cancel')]]));
     }
     if (s.flow === 'topup_amount') {
       const amount = Number(text.replace(/[₹,\s]/g,'')); if (!Number.isFinite(amount) || amount < 1 || amount > 10000) return ctx.reply('₹1–₹10,000 ke beech valid amount bhejein.');

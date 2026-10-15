@@ -91,7 +91,35 @@ async function showPrices(ctx) {
   const lines = data.map(p => `${ENGINES[p.engine]?.name || p.engine} | ${p.game} | ${p.duration_days} days — ${money(p.price)}`);
   await ctx.reply('💰 PRICE LIST\n\n' + lines.join('\n'), HOME);
 }
-async function beginBuy(ctx) { sessions.set(key(ctx.from.id), { flow: 'buy' }); await ctx.reply('Select engine:', engineKb('buy')); }
+async function beginBuy(ctx) {
+  sessions.set(key(ctx.from.id), { flow: 'buy_engine' });
+  await ctx.reply('🛒 Select engine:', Markup.keyboard([
+    [ENGINES.snake.name, ENGINES.kos.name],
+    [ENGINES.aimai.name, ENGINES.shinigami.name],
+    ['❌ Cancel Purchase', '🏠 Main Menu'],
+  ]).resize());
+}
+function gameKeyboard(engine) {
+  const games = ENGINES[engine].games;
+  const rows = [];
+  for (let i=0; i<games.length; i+=2) rows.push(games.slice(i,i+2));
+  rows.push(['⬅️ Back', '❌ Cancel Purchase', '🏠 Main Menu']);
+  return Markup.keyboard(rows).resize();
+}
+function daysKeyboard(engine) {
+  const days = ENGINES[engine].days.map(d => `${d} Days`);
+  const rows = [];
+  for (let i=0; i<days.length; i+=3) rows.push(days.slice(i,i+3));
+  rows.push(['⬅️ Back', '❌ Cancel Purchase', '🏠 Main Menu']);
+  return Markup.keyboard(rows).resize();
+}
+function resellerQuantityKeyboard(max) {
+  const nums = Array.from({length: Math.min(10, max)}, (_,i)=>String(i+1));
+  const rows = [];
+  for (let i=0; i<nums.length; i+=5) rows.push(nums.slice(i,i+5));
+  rows.push(['📦 All Stock', '❌ Cancel Purchase']);
+  return Markup.inlineKeyboard(rows.map(row=>row.map(label=>Markup.button.callback(label, label==='📦 All Stock'?'qty:all':`qty:${label}`))));
+}
 async function askGame(ctx, prefix, engine) {
   const e = ENGINES[engine]; if (!e) return ctx.reply('Invalid engine.');
   sessions.set(key(ctx.from.id), { ...(sessions.get(key(ctx.from.id)) || {}), flow: prefix, engine });
@@ -212,9 +240,30 @@ bot.action(/^(buy|stock|price|reseller)day:(snake|kos|aimai|shinigami):([^:]+):(
   const product = await getProduct(engine,game,days); if (!product) return ctx.reply('This plan is not configured yet.');
   const count = await availableCount(product.id); if (!count) return ctx.reply('❌ Out of stock.', HOME);
   const unitPrice = await effectivePrice(product, ctx.from.id);
-  sessions.set(key(ctx.from.id), { flow:'buy_quantity', engine, game, days, productId:product.id, price:unitPrice });
-  await ctx.reply(`${ENGINES[engine].name}\n🎮 ${game}\n⏳ ${days} days\n💵 Unit price: ${money(unitPrice)}\n📦 Available: ${count}\n\nKitni keys chahiye? Quantity number bhejein (1-${Math.min(count,20)}).`);
+  const user = await ensureUser(ctx);
+  if (user.role === 'reseller') {
+    sessions.set(key(ctx.from.id), { flow:'reseller_quantity', engine, game, days, productId:product.id, price:unitPrice, available:count });
+    await ctx.reply(`${ENGINES[engine].name}\n🎮 ${game}\n⏳ ${days} days\n💵 Unit price: ${money(unitPrice)}\n📦 Available stock: ${count}\n\nQuantity choose karein:`, resellerQuantityKeyboard(count));
+  } else {
+    sessions.set(key(ctx.from.id), { flow:'confirm_purchase', engine, game, days, productId:product.id, price:unitPrice, qty:1, total:Number(unitPrice.toFixed(2)) });
+    await ctx.reply(`Confirm purchase?\n${ENGINES[engine].name}\n🎮 ${game} • ${days} days\nQuantity: 1 key\nPrice: ${money(unitPrice)}\nYour balance: ${money(user.balance)}\nBalance after purchase: ${money(Number(user.balance)-unitPrice)}`, Markup.inlineKeyboard([[Markup.button.callback('✅ Yes, Purchase','purchase_confirm'),Markup.button.callback('❌ Cancel Purchase','purchase_cancel')]]));
+  }
 });
+bot.action(/^qty:(all|[1-9]|10)$/, async ctx => {
+  await ctx.answerCbQuery();
+  const uid=key(ctx.from.id), s=sessions.get(uid);
+  if (!s || s.flow!=='reseller_quantity') return ctx.reply('Selection expired. Start Purchase Product again.');
+  try {
+    const qty = ctx.match[1]==='all' ? Number(await availableCount(s.productId)) : Number(ctx.match[1]);
+    const max = Number(await availableCount(s.productId));
+    if (!Number.isInteger(qty)||qty<1||qty>max) return ctx.reply(`Stock changed. Available now: ${max}. Please select again.`);
+    const user=await ensureUser(ctx); const total=Number((Number(s.price)*qty).toFixed(2));
+    if (Number(user.balance)<total) { sessions.delete(uid); return ctx.reply(`Insufficient balance. Total ${money(total)}, balance ${money(user.balance)}. Please Add Balance first.`,HOME); }
+    sessions.set(uid,{...s,flow:'confirm_purchase',qty,total});
+    return ctx.reply(`Confirm reseller purchase?\n${ENGINES[s.engine].name}\n${s.game} • ${s.days} days\nQuantity: ${qty}${ctx.match[1]==='all'?' (all available stock)':''}\nTotal: ${money(total)}\nBalance after purchase: ${money(Number(user.balance)-total)}`,Markup.inlineKeyboard([[Markup.button.callback('✅ Yes, Purchase','purchase_confirm'),Markup.button.callback('❌ Cancel Purchase','purchase_cancel')]]));
+  } catch(e) { console.error(e); return ctx.reply('Could not check quantity. Try again.'); }
+});
+
 bot.action(/^(approve_topup|reject_topup):(\d+)$/, async ctx => {
   await ctx.answerCbQuery(); if (!admin(ctx)) return ctx.reply('Admin only.');
   const [, action, id] = ctx.match;
@@ -251,8 +300,36 @@ bot.on('photo', async ctx => {
 bot.on('text', async (ctx, next) => {
   const uid = key(ctx.from.id); const text = ctx.message.text.trim(); const s = sessions.get(uid);
   if (!s || text.startsWith('/')) return next();
-  if (text === '❌ Cancel') { sessions.delete(uid); return ctx.reply('Cancelled.', HOME); }
+  if (text === '❌ Cancel' || text === '❌ Cancel Purchase') { sessions.delete(uid); return ctx.reply('Purchase/operation cancelled.', HOME); }
   try {
+    if (s.flow === 'buy_engine') {
+      const engine = Object.keys(ENGINES).find(k => ENGINES[k].name === text);
+      if (!engine) return next();
+      sessions.set(uid, { flow:'buy_game', engine });
+      return ctx.reply(`${ENGINES[engine].name}\n🎮 Select game:`, gameKeyboard(engine));
+    }
+    if (s.flow === 'buy_game') {
+      if (text === '⬅️ Back') return beginBuy(ctx);
+      const game = ENGINES[s.engine].games.find(g => g === text);
+      if (!game) return next();
+      sessions.set(uid, { flow:'buy_day', engine:s.engine, game });
+      return ctx.reply(`${game}\n⏳ Select duration:`, daysKeyboard(s.engine));
+    }
+    if (s.flow === 'buy_day') {
+      if (text === '⬅️ Back') { sessions.set(uid, {flow:'buy_game', engine:s.engine}); return ctx.reply('🎮 Select game:', gameKeyboard(s.engine)); }
+      const match = text.match(/^(\d+) Days$/); if (!match) return next();
+      const days = Number(match[1]);
+      if (!ENGINES[s.engine].days.includes(days)) return ctx.reply('Invalid duration. Select one of the buttons.');
+      const product = await getProduct(s.engine,s.game,days); if (!product) return ctx.reply('This plan is not configured yet.', HOME);
+      const count = await availableCount(product.id); if (!count) return ctx.reply('❌ Out of stock.', HOME);
+      const user = await ensureUser(ctx); const price = await effectivePrice(product,uid);
+      if (user.role === 'reseller') {
+        sessions.set(uid,{flow:'reseller_quantity',engine:s.engine,game:s.game,days,productId:product.id,price,available:count});
+        return ctx.reply(`${ENGINES[s.engine].name}\n🎮 ${s.game} • ${days} days\nUnit price: ${money(price)}\nAvailable: ${count}\nChoose quantity:`,resellerQuantityKeyboard(count));
+      }
+      sessions.set(uid,{flow:'confirm_purchase',engine:s.engine,game:s.game,days,productId:product.id,price,qty:1,total:Number(price.toFixed(2))});
+      return ctx.reply(`Confirm purchase?\n${ENGINES[s.engine].name}\n${s.game} • ${days} days\nQuantity: 1\nPrice: ${money(price)}\nBalance: ${money(user.balance)}`,Markup.inlineKeyboard([[Markup.button.callback('✅ Yes, Purchase','purchase_confirm'),Markup.button.callback('❌ Cancel Purchase','purchase_cancel')]]));
+    }
     if (s.flow === 'topup_amount') {
       const amount = Number(text.replace(/[₹,\s]/g,'')); if (!Number.isFinite(amount) || amount < 1 || amount > 10000) return ctx.reply('₹1–₹10,000 ke beech valid amount bhejein.');
       const qr = await getSetting('payment_qr_file_id'); if (!qr) return ctx.reply('Admin ne abhi QR set nahi kiya hai.');
@@ -260,13 +337,8 @@ bot.on('text', async (ctx, next) => {
       await ctx.replyWithPhoto(qr, { caption:`➕ Add Balance\nAmount: ${money(amount)}\n\nQR par payment karein. Payment ke baad isi chat mein screenshot bhejein. Admin verify karke balance credit karega. Sirf screenshot se automatic credit nahi hoga.` });
       return;
     }
-    if (s.flow === 'buy_quantity') {
-      const qty = Number(text); if (!Number.isInteger(qty) || qty < 1 || qty > 20) return ctx.reply('Quantity 1 se 20 ke beech whole number honi chahiye.');
-      const count = await availableCount(s.productId); if (count < qty) return ctx.reply(`Stock kam hai. Available: ${count}`);
-      const user = await ensureUser(ctx); const total = Number((s.price * qty).toFixed(2));
-      if (Number(user.balance) < total) { sessions.delete(uid); return ctx.reply(`Insufficient balance. Total ${money(total)}, balance ${money(user.balance)}. Add Balance karein.`, HOME); }
-      sessions.set(uid,{...s,flow:'confirm_purchase',qty,total});
-      return ctx.reply(`Confirm purchase?\n${ENGINES[s.engine].name}\n${s.game} • ${s.days} days\nQuantity: ${qty}\nTotal: ${money(total)}\nBalance after purchase: ${money(Number(user.balance)-total)}`, Markup.inlineKeyboard([[Markup.button.callback('✅ Confirm & Buy','purchase_confirm'),Markup.button.callback('❌ Cancel','purchase_cancel')]]));
+    if (s.flow === 'reseller_quantity') {
+      return ctx.reply('Reseller quantity ke liye neeche diye gaye inline buttons use karein.');
     }
     if (s.flow === 'stock_keys') {
       if (!admin(ctx)) return ctx.reply('Admin only.'); const codes = text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean); if (!codes.length) return ctx.reply('Send at least one key.');

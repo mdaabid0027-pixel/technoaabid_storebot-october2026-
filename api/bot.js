@@ -1,776 +1,316 @@
-import { Telegraf, Markup } from "telegraf";
-import { createClient } from "@supabase/supabase-js";
+import { Telegraf, Markup } from 'telegraf';
+import { createClient } from '@supabase/supabase-js';
 
-const requiredEnv = ["BOT_TOKEN", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"];
-const missingEnv = requiredEnv.filter((name) => !process.env[name]);
-if (missingEnv.length) {
-  console.error(`Missing required environment variables: ${missingEnv.join(", ")}`);
-  throw new Error(`Missing required environment variables: ${missingEnv.join(", ")}`);
-}
-
+const required = ['BOT_TOKEN', 'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'];
+const missing = required.filter((k) => !process.env[k]);
+if (missing.length) throw new Error(`Missing environment variables: ${missing.join(', ')}`);
 const bot = new Telegraf(process.env.BOT_TOKEN);
-
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
-
-const ADMIN_ID = "5006281199";
-const NOTIFY_ID = "8519564658";
-
+const db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
+const ADMIN_ID = String(process.env.ADMIN_ID || '5006281199');
+const NOTIFY_ID = String(process.env.NOTIFY_ID || '8519564658');
 const ENGINES = {
-  snake: {
-    name: "🐍 Snake Engine",
-    games: ["8 Ball Pool", "Carrom", "Soccer"],
-    days: [3, 10, 30, 90],
-  },
-  kos: {
-    name: "🚀 Kos Engine",
-    games: ["8 Ball Pool", "Carrom"],
-    days: [1, 7, 15, 30],
-  },
-  aimai: {
-    name: "🎯 AimAI Engine",
-    games: ["8 Ball Pool", "Carrom"],
-    days: [1, 3, 7, 15, 30, 90],
-  },
-  shinigami: {
-    name: "👹 Shinigami",
-    games: ["Carrom"],
-    days: [1, 3, 7, 15, 30, 90],
-  },
+  snake: { name: '🐍 Snake Engine', games: ['8 Ball Pool', 'Carrom', 'Soccer'], days: [3, 10, 30, 90] },
+  kos: { name: '🚀 Kos Engine', games: ['8 Ball Pool', 'Carrom'], days: [1, 7, 15, 30] },
+  aimai: { name: '🎯 AimAI Engine', games: ['8 Ball Pool', 'Carrom'], days: [1, 3, 7, 15, 30, 90] },
+  shinigami: { name: '👹 Shinigami', games: ['Carrom'], days: [1, 3, 7, 15, 30, 90] },
 };
-
-const sessions = new Map();
-
-function isAdmin(ctx) {
-  return String(ctx.from?.id) === ADMIN_ID;
-}
-
-function esc(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function inline(rows) {
-  return Markup.inlineKeyboard(rows);
-}
-
-function engineButtons(prefix) {
-  return Object.entries(ENGINES).map(([key, engine]) => [
-    {
-      text: engine.name,
-      callback_data: `${prefix}_${key}`,
-    },
-  ]);
-}
-
-function homeButtons() {
-  return inline([
-    [{ text: "🛒 Purchase Product", callback_data: "buy" }],
-    [
-      { text: "💰 Balance", callback_data: "balance" },
-      { text: "➕ Add Balance", callback_data: "topup" },
-    ],
-    [
-      { text: "📦 Check Stock", callback_data: "stock" },
-      { text: "🧾 Purchase History", callback_data: "history" },
-    ],
-    [{ text: "🏆 Top Key Buyers", callback_data: "leaderboard" }],
-    [{ text: "ℹ️ Help", callback_data: "help" }],
-  ]);
-}
-
-function adminButtons() {
-  return inline([
-    [
-      { text: "➕ Add Stock", callback_data: "admin_stock" },
-      { text: "💵 Set User Price", callback_data: "admin_price" },
-    ],
-    [
-      { text: "👥 Add Reseller", callback_data: "admin_reseller" },
-      { text: "💳 Add Balance", callback_data: "admin_balance" },
-    ],
-    [
-      { text: "🧾 Set QR", callback_data: "admin_qr" },
-      { text: "📊 Sales / Stock", callback_data: "admin_stats" },
-    ],
-    [
-      { text: "🔔 Start Notifications", callback_data: "admin_notify" },
-      { text: "📣 Broadcast", callback_data: "admin_broadcast" },
-    ],
-    [{ text: "🏠 Home", callback_data: "home" }],
-  ]);
-}
-
-async function getUser(ctx) {
-  const uid = String(ctx.from.id);
-  const { data, error } = await supabase
-    .from("store_users")
-    .select("*")
-    .eq("telegram_id", uid)
-    .maybeSingle();
-
+const HOME = Markup.keyboard([
+  ['🛒 Purchase Product', '💰 Price List'],
+  ['💳 Check Balance', '➕ Add Balance'],
+  ['📦 Check Stock', '🧾 Purchase History'],
+  ['🏆 Leaderboard', 'ℹ️ Help'],
+]).resize();
+const ADMIN_MENU = Markup.keyboard([
+  ['➕ Add Stock', '💵 Set Price'],
+  ['👥 Add Reseller', '💳 Add Balance to User'],
+  ['🧾 Set QR', '📊 Stats'],
+  ['🔔 Start Notifications', '📣 Broadcast'],
+  ['🏠 Main Menu'],
+]).resize();
+const BACK = Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'back'), Markup.button.callback('🏠 Main Menu', 'home')]]);
+const sessions = new Map(); // UI-only state; purchase/payment records themselves are persisted in Supabase.
+const key = (id) => String(id);
+const admin = (ctx) => key(ctx.from?.id) === ADMIN_ID;
+const safe = (s) => String(s ?? '').replace(/[&<>]/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;' }[c]));
+const money = (n) => `₹${Number(n || 0).toFixed(2)}`;
+function engineKb(prefix) { return Markup.inlineKeyboard([
+  [{ text: ENGINES.snake.name, callback_data: `${prefix}:snake` }, { text: ENGINES.kos.name, callback_data: `${prefix}:kos` }],
+  [{ text: ENGINES.aimai.name, callback_data: `${prefix}:aimai` }, { text: ENGINES.shinigami.name, callback_data: `${prefix}:shinigami` }],
+  [{ text: '🏠 Main Menu', callback_data: 'home' }],
+]); }
+async function ensureUser(ctx) {
+  const id = key(ctx.from.id);
+  const row = { telegram_id: id, full_name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' '), username: ctx.from.username || null };
+  const { data, error } = await db.from('store_users').select('*').eq('telegram_id', id).maybeSingle();
   if (error) throw error;
-
-  if (data) {
-    await supabase.from("store_users").update({
-      full_name: [
-        ctx.from.first_name || "",
-        ctx.from.last_name || "",
-      ].join(" ").trim(),
-      username: ctx.from.username || null,
-    }).eq("telegram_id", uid);
-
-    return data;
+  if (!data) {
+    const { error: ie } = await db.from('store_users').insert({ ...row, balance: 0, role: id === ADMIN_ID ? 'admin' : 'user' });
+    if (ie) throw ie;
+    return { ...row, balance: 0, role: id === ADMIN_ID ? 'admin' : 'user' };
   }
-
-  const { data: created, error: insertError } = await supabase
-    .from("store_users")
-    .insert({
-      telegram_id: uid,
-      full_name: [
-        ctx.from.first_name || "",
-        ctx.from.last_name || "",
-      ].join(" ").trim(),
-      username: ctx.from.username || null,
-      role: uid === ADMIN_ID ? "admin" : "user",
-    })
-    .select()
-    .single();
-
-  if (insertError) throw insertError;
-  return created;
+  await db.from('store_users').update({ full_name: row.full_name, username: row.username }).eq('telegram_id', id);
+  return data;
 }
-
-async function setting(key, value) {
-  if (value === undefined) {
-    const { data, error } = await supabase
-      .from("store_settings")
-      .select("value")
-      .eq("key", key)
-      .maybeSingle();
-
-    if (error) throw error;
-    return data?.value ?? null;
-  }
-
-  const { error } = await supabase
-    .from("store_settings")
-    .upsert({ key, value }, { onConflict: "key" });
-
+async function getSetting(name) {
+  const { data, error } = await db.from('store_settings').select('value').eq('key', name).maybeSingle();
+  if (error) throw error;
+  return data?.value ?? null;
+}
+async function setSetting(name, value) {
+  const { error } = await db.from('store_settings').upsert({ key: name, value }, { onConflict: 'key' });
   if (error) throw error;
 }
-
+async function home(ctx) {
+  const u = await ensureUser(ctx);
+  await ctx.replyWithHTML(`✨ <b>TECHNO AABID STORE</b>\n👤 ${safe(u.full_name || ctx.from.first_name)}\n🆔 <code>${ctx.from.id}</code>\n💰 Balance: ${money(u.balance)}\n\nChoose an option below.`, HOME);
+}
 async function getProduct(engine, game, days) {
-  const { data, error } = await supabase
-    .from("store_products")
-    .select("*")
-    .eq("engine", engine)
-    .eq("game", game)
-    .eq("duration_days", days)
-    .eq("active", true)
-    .maybeSingle();
-
+  const { data, error } = await db.from('store_products').select('*').eq('engine', engine).eq('game', game).eq('duration_days', days).eq('active', true).maybeSingle();
   if (error) throw error;
   return data;
 }
-
-async function startFlow(ctx, flow, extra = {}) {
-  sessions.set(String(ctx.from.id), { flow, ...extra });
+async function effectivePrice(product, telegramId) {
+  const { data: u, error: ue } = await db.from('store_users').select('role').eq('telegram_id', key(telegramId)).maybeSingle();
+  if (ue) throw ue;
+  if (u?.role === 'reseller') {
+    const { data: rp, error: re } = await db.from('store_reseller_prices').select('price').eq('telegram_id', key(telegramId)).eq('product_id', product.id).maybeSingle();
+    if (re) throw re;
+    if (rp && Number(rp.price) > 0) return Number(rp.price);
+  }
+  return Number(product.price);
 }
-
-async function askEngine(ctx, prefix) {
-  await ctx.reply(
-    "⚙️ Select Engine",
-    engineButtons(prefix)
-  );
+async function availableCount(productId) {
+  const { count, error } = await db.from('store_stock').select('id', { count: 'exact', head: true }).eq('product_id', productId).is('sold_to', null);
+  if (error) throw error;
+  return count || 0;
 }
-
-async function sendHome(ctx) {
-  const user = await getUser(ctx);
-
-  await ctx.replyWithHTML(
-    "✨ <b>WELCOME TO TECHNO AABID STORE</b>\n\n" +
-    `👤 ${esc(user.full_name || ctx.from.first_name)}\n` +
-    `🆔 <code>${ctx.from.id}</code>\n\n` +
-    "Choose an option:",
-    homeButtons()
-  );
+async function showPrices(ctx) {
+  const { data, error } = await db.from('store_products').select('engine,game,duration_days,price').eq('active', true).order('engine').order('game').order('duration_days');
+  if (error) throw error;
+  if (!data?.length) return ctx.reply('Price list abhi set nahi hui. Admin se contact karein.', HOME);
+  const lines = data.map(p => `${ENGINES[p.engine]?.name || p.engine} | ${p.game} | ${p.duration_days} days — ${money(p.price)}`);
+  await ctx.reply('💰 PRICE LIST\n\n' + lines.join('\n'), HOME);
 }
-
+async function beginBuy(ctx) { sessions.set(key(ctx.from.id), { flow: 'buy' }); await ctx.reply('Select engine:', engineKb('buy')); }
+async function askGame(ctx, prefix, engine) {
+  const e = ENGINES[engine]; if (!e) return ctx.reply('Invalid engine.');
+  sessions.set(key(ctx.from.id), { ...(sessions.get(key(ctx.from.id)) || {}), flow: prefix, engine });
+  await ctx.reply(`${e.name}\nSelect game:`, Markup.inlineKeyboard([
+    ...e.games.map((g, i) => [{ text: g, callback_data: `${prefix}game:${engine}:${i}` }]),
+    [{ text: '⬅️ Back', callback_data: prefix === 'buy' ? 'buyback' : 'adminback' }, { text: '🏠 Main Menu', callback_data: 'home' }],
+  ]));
+}
+async function askDays(ctx, prefix, engine, game) {
+  const e = ENGINES[engine];
+  await ctx.reply(`${game}\nSelect duration:`, Markup.inlineKeyboard([
+    ...e.days.map(d => [{ text: `${d} Days`, callback_data: `${prefix}day:${engine}:${encodeURIComponent(game)}:${d}` }]),
+    [{ text: '⬅️ Back', callback_data: `${prefix}backgame:${engine}` }, { text: '🏠 Main Menu', callback_data: 'home' }],
+  ]));
+}
+async function beginTopup(ctx) {
+  sessions.set(key(ctx.from.id), { flow: 'topup_amount' });
+  await ctx.reply('Kitna balance add karna hai? Amount INR mein bhejein (₹1 se ₹10,000).');
+}
+async function notifyAdmin(text, extra = {}) {
+  try { await bot.telegram.sendMessage(ADMIN_ID, text, extra); } catch (e) { console.error('Admin notification failed', e.message); }
+}
 bot.start(async (ctx) => {
   try {
-    await getUser(ctx);
-    await sendHome(ctx);
-
-    const notify = await setting("start_notifications");
-    if (notify !== false && String(ctx.from.id) !== NOTIFY_ID) {
-      await bot.telegram.sendMessage(
-        NOTIFY_ID,
-        `🔔 New bot start\nName: ${esc(ctx.from.first_name)}\nID: ${ctx.from.id}`
-      ).catch(() => {});
-    }
-  } catch (error) {
-    console.error(error);
-    await ctx.reply("❌ Temporary error. Please try again.");
-  }
+    await home(ctx);
+    const enabled = await getSetting('start_notifications');
+    if (enabled !== false && key(ctx.from.id) !== NOTIFY_ID) await bot.telegram.sendMessage(NOTIFY_ID, `🔔 New start\nName: ${safe(ctx.from.first_name)}\nID: ${ctx.from.id}`).catch(() => {});
+  } catch (e) { console.error(e); await ctx.reply('Temporary database error. Please try again later.'); }
 });
-
-bot.command("admin", async (ctx) => {
-  if (!isAdmin(ctx)) return ctx.reply("⛔ Admin only.");
-  await ctx.reply("🛠 Admin Panel", adminButtons());
+bot.command('admin', async ctx => { if (!admin(ctx)) return ctx.reply('Admin only.'); await ctx.reply('🛠 Admin Panel', ADMIN_MENU); });
+bot.command('cancel', async ctx => { sessions.delete(key(ctx.from.id)); await ctx.reply('Cancelled.', HOME); });
+bot.command('setqr', async ctx => { if (!admin(ctx)) return ctx.reply('Admin only.'); sessions.set(key(ctx.from.id), { flow: 'set_qr' }); await ctx.reply('Ab payment QR image bhejo.'); });
+bot.command('setprice', async ctx => { if (!admin(ctx)) return ctx.reply('Admin only.'); sessions.set(key(ctx.from.id), { flow: 'setprice_engine' }); await ctx.reply('Select engine:', engineKb('price')); });
+bot.command('addstock', async ctx => { if (!admin(ctx)) return ctx.reply('Admin only.'); await ctx.reply('Select engine:', engineKb('stock')); });
+bot.command('addbalance', async ctx => {
+  if (!admin(ctx)) return ctx.reply('Admin only.');
+  const [, uid, amountText] = ctx.message.text.trim().split(/\s+/); const amount = Number(amountText);
+  if (!/^\d+$/.test(uid || '') || !Number.isFinite(amount) || amount <= 0) return ctx.reply('Use: /addbalance USER_ID AMOUNT');
+  const { data: user, error } = await db.from('store_users').select('telegram_id,balance').eq('telegram_id', uid).maybeSingle();
+  if (error || !user) return ctx.reply('User not found or database error. User must /start first.');
+  const { error: ue } = await db.rpc('admin_credit_balance', { p_telegram_id: uid, p_amount: amount, p_reference: `admin:${ctx.from.id}:${Date.now()}` });
+  if (ue) return ctx.reply(`Credit failed: ${ue.message}. Check SQL setup.`);
+  await ctx.reply(`Added ${money(amount)} to ${uid}.`); await bot.telegram.sendMessage(uid, `💰 Admin credited ${money(amount)} to your balance.`).catch(() => {});
 });
-
-bot.command("cancel", async (ctx) => {
-  sessions.delete(String(ctx.from.id));
-  await ctx.reply("❌ Current operation cancelled.", homeButtons());
-});
-
-bot.command("setqr", async (ctx) => {
-  if (!isAdmin(ctx)) return ctx.reply("⛔ Admin only.");
-  await startFlow(ctx, "qr");
-  await ctx.reply("🧾 Ab QR image bhejo. /cancel se cancel kar sakte ho.");
-});
-
-bot.command("addbalance", async (ctx) => {
-  if (!isAdmin(ctx)) return ctx.reply("⛔ Admin only.");
-
-  const [, uid, amountText, ...txnParts] = ctx.message.text.split(/\s+/);
-  const amount = Number(amountText);
-  const txn = txnParts.join(" ").trim();
-
-  if (!uid || !Number.isFinite(amount) || amount <= 0) {
-    return ctx.reply(
-      "Format:\n/addbalance USER_ID AMOUNT [TXN]\n\nExample:\n/addbalance 123456789 500 TXN123"
-    );
-  }
-
-  const { data: user, error } = await supabase
-    .from("store_users")
-    .select("balance")
-    .eq("telegram_id", uid)
-    .maybeSingle();
-
-  if (error) return ctx.reply("❌ Database error.");
-  if (!user) return ctx.reply("❌ User not found. User ko pehle /start karna hoga.");
-
-  const { error: updateError } = await supabase
-    .from("store_users")
-    .update({ balance: Number(user.balance) + amount })
-    .eq("telegram_id", uid);
-
-  if (updateError) return ctx.reply("❌ Balance update failed.");
-
-  await ctx.reply(
-    `✅ ₹${amount.toFixed(2)} balance added.\nUser ID: ${uid}` +
-    (txn ? `\nTransaction: ${esc(txn)}` : "")
-  );
-
-  await bot.telegram.sendMessage(
-    uid,
-    `💰 Your balance has been credited by ₹${amount.toFixed(2)}.`
-  ).catch(() => {});
-});
-
-bot.command("addreseller", async (ctx) => {
-  if (!isAdmin(ctx)) return ctx.reply("⛔ Admin only.");
-
+bot.command('addreseller', async ctx => {
+  if (!admin(ctx)) return ctx.reply('Admin only.');
   const uid = ctx.message.text.trim().split(/\s+/)[1];
-
-  if (!uid || !/^\d+$/.test(uid)) {
-    return ctx.reply("Use: /addreseller USER_ID");
-  }
-
-  const { data: user, error } = await supabase
-    .from("store_users")
-    .select("telegram_id")
-    .eq("telegram_id", uid)
-    .maybeSingle();
-
-  if (error) return ctx.reply("❌ Database error.");
-  if (!user) return ctx.reply("❌ User not found. Ask them to start the bot first.");
-
-  const { error: roleError } = await supabase
-    .from("store_users")
-    .update({ role: "reseller" })
-    .eq("telegram_id", uid);
-
-  if (roleError) return ctx.reply("❌ Could not set reseller role.");
-
-  await startFlow(ctx, "reseller", {
-    target: uid,
-    engine: null,
-    game: null,
-    days: null,
-  });
-
-  await ctx.reply(
-    `👥 Reseller ${uid} added.\nSelect engine for price grid:`,
-    engineButtons("rgrid")
-  );
+  if (!/^\d+$/.test(uid || '')) return ctx.reply('Use: /addreseller USER_ID');
+  const { data, error } = await db.from('store_users').select('telegram_id').eq('telegram_id', uid).maybeSingle();
+  if (error || !data) return ctx.reply('User not found. Ask user to /start first.');
+  const { error: e } = await db.from('store_users').update({ role: 'reseller' }).eq('telegram_id', uid);
+  if (e) return ctx.reply('Could not update role.');
+  sessions.set(key(ctx.from.id), { flow: 'reseller_engine', target: uid }); await ctx.reply('Reseller enabled. Choose engine to set reseller prices:', engineKb('reseller'));
 });
-
-bot.command("setprice", async (ctx) => {
-  if (!isAdmin(ctx)) return ctx.reply("⛔ Admin only.");
-  await startFlow(ctx, "price");
-  await askEngine(ctx, "pengine");
+// Reply keyboard text routes
+bot.hears('🏠 Main Menu', home);
+bot.hears('🛒 Purchase Product', beginBuy);
+bot.hears('💰 Price List', async ctx => { try { await showPrices(ctx); } catch (e) { console.error(e); await ctx.reply('Could not load price list.'); } });
+bot.hears('💳 Check Balance', async ctx => { try { const u = await ensureUser(ctx); await ctx.reply(`💰 Your balance: ${money(u.balance)}`, HOME); } catch (e) { console.error(e); await ctx.reply('Could not load balance.'); } });
+bot.hears('➕ Add Balance', beginTopup);
+bot.hears('📦 Check Stock', async ctx => {
+  try { const { data, error } = await db.from('store_stock').select('id', { count: 'exact' }).is('sold_to', null); if (error) throw error; await ctx.reply(`📦 Available keys: ${data?.length ?? 0}`, HOME); }
+  catch (e) { console.error(e); await ctx.reply('Could not load stock.'); }
 });
-
-bot.command("addstock", async (ctx) => {
-  if (!isAdmin(ctx)) return ctx.reply("⛔ Admin only.");
-  await startFlow(ctx, "stock");
-  await askEngine(ctx, "sengine");
+bot.hears('🧾 Purchase History', async ctx => {
+  try { const { data, error } = await db.from('store_purchases').select('quantity,total_price,status,created_at,product_id').eq('telegram_id', key(ctx.from.id)).order('created_at', { ascending: false }).limit(10); if (error) throw error;
+    if (!data?.length) return ctx.reply('No purchases yet.', HOME);
+    await ctx.reply('🧾 Purchase History\n' + data.map((p,i) => `${i+1}. ${p.quantity} key(s) • ${money(p.total_price)} • ${p.status} • ${new Date(p.created_at).toLocaleString('en-IN')}`).join('\n'), HOME);
+  } catch (e) { console.error(e); await ctx.reply('Could not load history.'); }
 });
-
-// Main inline callback router
-bot.action(
-  /^(home|buy|balance|topup|stock|history|leaderboard|help|admin_stock|admin_price|admin_reseller|admin_balance|admin_qr|admin_stats|admin_notify|admin_broadcast)$/,
-  async (ctx) => {
-    await ctx.answerCbQuery();
-
-    try {
-      const action = ctx.match[1];
-
-      if (action === "home") return sendHome(ctx);
-      if (action === "buy") return askEngine(ctx, "buyengine");
-      if (action === "admin_stock") {
-        if (!isAdmin(ctx)) return ctx.reply("⛔ Admin only.");
-        sessions.set(String(ctx.from.id), { flow: "stock" });
-        return askEngine(ctx, "sengine");
-      }
-      if (action === "admin_price") {
-        if (!isAdmin(ctx)) return ctx.reply("⛔ Admin only.");
-        sessions.set(String(ctx.from.id), { flow: "price" });
-        return askEngine(ctx, "pengine");
-      }
-      if (action === "admin_reseller") {
-        if (!isAdmin(ctx)) return ctx.reply("Use /addreseller USER_ID");
-        return ctx.reply("Use /addreseller USER_ID to open a reseller grid.");
-      }
-      if (action === "admin_balance") {
-        if (!isAdmin(ctx)) return ctx.reply("⛔ Admin only.");
-        return ctx.reply("Use /addbalance USER_ID AMOUNT [TXN]");
-      }
-      if (action === "admin_qr") {
-        if (!isAdmin(ctx)) return ctx.reply("⛔ Admin only.");
-        sessions.set(String(ctx.from.id), { flow: "qr" });
-        return ctx.reply("Send QR image now, or /cancel.");
-      }
-      if (action === "admin_notify") {
-        if (!isAdmin(ctx)) return ctx.reply("⛔ Admin only.");
-        const current = await setting("start_notifications");
-        await setting("start_notifications", current === false);
-        return ctx.reply(
-          `🔔 Start notifications: ${current === false ? "ON" : "OFF"}`,
-          adminButtons()
-        );
-      }
-      if (action === "admin_broadcast") {
-        if (!isAdmin(ctx)) return ctx.reply("⛔ Admin only.");
-        sessions.set(String(ctx.from.id), { flow: "broadcast" });
-        return ctx.reply("📣 Broadcast message bhejo. /cancel to cancel.");
-      }
-      if (action === "admin_stats") {
-        if (!isAdmin(ctx)) return ctx.reply("⛔ Admin only.");
-
-        const { count: users } = await supabase
-          .from("store_users")
-          .select("*", { count: "exact", head: true });
-
-        const { count: stock } = await supabase
-          .from("store_stock")
-          .select("*", { count: "exact", head: true })
-          .is("sold_to", null);
-
-        return ctx.reply(
-          `📊 Store Stats\nUsers: ${users ?? 0}\nAvailable keys: ${stock ?? 0}`,
-          adminButtons()
-        );
-      }
-      if (action === "balance") {
-        const user = await getUser(ctx);
-        return ctx.reply(`💰 Balance: ₹${Number(user.balance).toFixed(2)}`, homeButtons());
-      }
-      if (action === "topup") {
-        const qr = await setting("payment_qr_file_id");
-        if (!qr) return ctx.reply("QR abhi admin ne set nahi kiya.", homeButtons());
-        await ctx.replyWithPhoto(qr, {
-          caption: "➕ Balance add karne ke liye payment karke admin se contact karein.",
-          ...homeButtons(),
-        });
-        return;
-      }
-      if (action === "stock") {
-        const { data, error } = await supabase
-          .from("store_stock")
-          .select("product_id")
-          .is("sold_to", null);
-
-        if (error) throw error;
-        return ctx.reply(`📦 Available keys: ${data.length}`, homeButtons());
-      }
-      if (action === "history") {
-        const { data, error } = await supabase
-          .from("store_purchases")
-          .select("quantity,total_price,status,created_at,product_id")
-          .eq("telegram_id", String(ctx.from.id))
-          .order("created_at", { ascending: false })
-          .limit(10);
-
-        if (error) throw error;
-        if (!data.length) return ctx.reply("🧾 No purchases yet.", homeButtons());
-
-        return ctx.reply(
-          "🧾 Recent purchases\n\n" +
-          data.map((p, i) =>
-            `${i + 1}. ${p.quantity} key(s) — ₹${p.total_price} — ${p.status}`
-          ).join("\n"),
-          homeButtons()
-        );
-      }
-      if (action === "leaderboard") {
-        const { data, error } = await supabase
-          .from("store_purchases")
-          .select("telegram_id,quantity,status")
-          .eq("status", "completed");
-
-        if (error) throw error;
-
-        const totals = {};
-        for (const row of data) {
-          totals[row.telegram_id] =
-            (totals[row.telegram_id] || 0) + Number(row.quantity || 0);
-        }
-
-        const ranked = Object.entries(totals)
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 10);
-
-        if (!ranked.length) {
-          return ctx.reply("🏆 Leaderboard abhi empty hai.", homeButtons());
-        }
-
-        const ids = ranked.map(([id]) => id);
-        const { data: users, error: userError } = await supabase
-          .from("store_users")
-          .select("telegram_id,full_name,username")
-          .in("telegram_id", ids);
-
-        if (userError) throw userError;
-
-        const names = Object.fromEntries(
-          users.map(u => [
-            u.telegram_id,
-            u.full_name || (u.username ? `@${u.username}` : "Buyer"),
-          ])
-        );
-
-        const medals = ["🥇", "🥈", "🥉"];
-        const lines = ranked.map(([id, quantity], i) =>
-          `${medals[i] || `${i + 1}.`} ${esc(names[id] || "Buyer")} — <b>${quantity} keys</b>`
-        );
-
-        return ctx.replyWithHTML(
-          "<b>🏆 TOP KEY BUYERS</b>\n\n" + lines.join("\n"),
-          homeButtons()
-        );
-      }
-      if (action === "help") {
-        return ctx.reply(
-          "Use Purchase Product to choose an available plan. For balance top-ups, follow the QR instructions.",
-          homeButtons()
-        );
-      }
-    } catch (error) {
-      console.error(error);
-      await ctx.reply("❌ Something went wrong. Please try again.");
-    }
-  }
-);
-
-// Engine selection for buying/admin workflows
-bot.action(/^(buyengine|sengine|pengine|rgrid)_(snake|kos|aimai|shinigami)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-
-  const [, prefix, key] = ctx.match;
-  const engine = ENGINES[key];
-  const uid = String(ctx.from.id);
-  const session = sessions.get(uid) || {};
-
-  if (prefix !== "buyengine" && !isAdmin(ctx)) {
-    return ctx.reply("⛔ Admin only.");
-  }
-
-  if (prefix === "rgrid" && session.flow !== "reseller") {
-    return ctx.reply("❌ Start with /addreseller USER_ID");
-  }
-
-  sessions.set(uid, {
-    ...session,
-    engine: key,
-    game: null,
-    days: null,
-  });
-
-  const buttons = engine.games.map((game, i) => [{
-    text: game,
-    callback_data: `${prefix === "buyengine" ? "buygame" : prefix === "sengine" ? "sgame" : prefix === "pengine" ? "pgame" : "rgame"}_${key}_${i}`,
-  }]);
-
-  buttons.push([{ text: "⬅️ Home", callback_data: "home" }]);
-
-  await ctx.reply(
-    `${engine.name}\nSelect game:`,
-    Markup.inlineKeyboard(buttons)
-  );
+bot.hears('🏆 Leaderboard', async ctx => {
+  try { const { data, error } = await db.from('store_purchases').select('telegram_id,quantity,status').eq('status','completed'); if (error) throw error;
+    const totals = {}; for (const r of data || []) totals[r.telegram_id] = (totals[r.telegram_id] || 0) + Number(r.quantity || 0);
+    const top = Object.entries(totals).sort((a,b)=>b[1]-a[1]).slice(0,10); if (!top.length) return ctx.reply('Leaderboard empty.', HOME);
+    await ctx.reply('🏆 TOP KEY BUYERS\n' + top.map(([id,n],i)=>`${i+1}. ${id} — ${n} keys`).join('\n'), HOME);
+  } catch (e) { console.error(e); await ctx.reply('Could not load leaderboard.'); }
 });
-
-// Game selection
-bot.action(/^(buygame|sgame|pgame|rgame)_(snake|kos|aimai|shinigami)_(\d+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-
-  const [, prefix, key, indexText] = ctx.match;
-  const engine = ENGINES[key];
-  const game = engine?.games[Number(indexText)];
-
-  if (!game) return ctx.reply("❌ Invalid game.");
-
-  if (prefix !== "buygame" && !isAdmin(ctx)) {
-    return ctx.reply("⛔ Admin only.");
-  }
-
-  const uid = String(ctx.from.id);
-  const session = sessions.get(uid) || {};
-
-  sessions.set(uid, { ...session, engine: key, game });
-
-  const buttons = engine.days.map(days => [{
-    text: `${days} Days`,
-    callback_data: `${prefix === "buygame" ? "buyday" : prefix === "sgame" ? "sday" : prefix === "pgame" ? "pday" : "rday"}_${key}_${days}`,
-  }]);
-
-  buttons.push([{ text: "⬅️ Back", callback_data: `${prefix === "buygame" ? "buyengine" : prefix === "sgame" ? "sengine" : prefix === "pgame" ? "pengine" : "rgrid"}_${key}` }]);
-
-  await ctx.reply(
-    `🎮 ${game}\nSelect duration:`,
-    Markup.inlineKeyboard(buttons)
-  );
+bot.hears('ℹ️ Help', ctx => ctx.reply('Purchase: select engine, game, duration, quantity and confirm. Add Balance: enter amount, pay the shown QR and send payment screenshot in this chat. Admin reviews screenshots manually. Never send OTP or UPI PIN.', HOME));
+bot.hears('➕ Add Stock', async ctx => { if (!admin(ctx)) return ctx.reply('Admin only.'); await ctx.reply('Select engine:', engineKb('stock')); });
+bot.hears('💵 Set Price', async ctx => { if (!admin(ctx)) return ctx.reply('Admin only.'); await ctx.reply('Select engine:', engineKb('price')); });
+bot.hears('👥 Add Reseller', ctx => admin(ctx) ? ctx.reply('Use /addreseller USER_ID') : ctx.reply('Admin only.'));
+bot.hears('💳 Add Balance to User', ctx => admin(ctx) ? ctx.reply('Use /addbalance USER_ID AMOUNT') : ctx.reply('Admin only.'));
+bot.hears('🧾 Set QR', async ctx => { if (!admin(ctx)) return ctx.reply('Admin only.'); sessions.set(key(ctx.from.id), { flow: 'set_qr' }); await ctx.reply('Send the payment QR image.'); });
+bot.hears('📊 Stats', async ctx => {
+  if (!admin(ctx)) return ctx.reply('Admin only.');
+  try { const [{ count: users, error: ue }, { count: stock, error: se }, { count: purchases, error: pe }] = await Promise.all([
+    db.from('store_users').select('*',{count:'exact',head:true}), db.from('store_stock').select('*',{count:'exact',head:true}).is('sold_to',null), db.from('store_purchases').select('*',{count:'exact',head:true})]);
+    if (ue||se||pe) throw ue||se||pe; await ctx.reply(`📊 Stats\nUsers: ${users||0}\nAvailable keys: ${stock||0}\nPurchase records: ${purchases||0}`, ADMIN_MENU);
+  } catch(e) { console.error(e); await ctx.reply('Stats failed.'); }
 });
-
-// Duration selection
-bot.action(/^(sday|pday|rday|buyday)_(snake|kos|aimai|shinigami)_(\d+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-
-  const [, prefix, key, daysText] = ctx.match;
-  const days = Number(daysText);
-  const engine = ENGINES[key];
-  const uid = String(ctx.from.id);
-  const session = sessions.get(uid) || {};
-
-  if (prefix !== "buyday" && !isAdmin(ctx)) {
-    return ctx.reply("⛔ Admin only.");
-  }
-
-  if (!engine.days.includes(days) || !session.game) {
-    return ctx.reply("❌ Invalid selection. Start again.");
-  }
-
-  session.engine = key;
-  session.days = days;
-
-  if (prefix === "sday") {
-    sessions.set(uid, { ...session, flow: "stock_codes" });
-    return ctx.reply(
-      `📦 Send license key(s) for ${engine.name} / ${session.game} / ${days} Days.\nSend one key per line.`
-    );
-  }
-
-  if (prefix === "pday") {
-    sessions.set(uid, { ...session, flow: "price_value" });
-    return ctx.reply("💵 Ab normal user price INR mein bhejo. Example: 199");
-  }
-
-  if (prefix === "rday") {
-    sessions.set(uid, { ...session, flow: "reseller_value" });
-    return ctx.reply(
-      `💵 ${session.target} ke liye reseller price bhejo (INR).\n${engine.name} / ${session.game} / ${days} Days`
-    );
-  }
-
-  const product = await getProduct(key, session.game, days);
-  if (!product) return ctx.reply("❌ Ye plan abhi configured nahi hai.");
-
-  const { count, error } = await supabase
-    .from("store_stock")
-    .select("id", { count: "exact", head: true })
-    .eq("product_id", product.id)
-    .is("sold_to", null);
-
-  if (error) return ctx.reply("❌ Stock lookup failed.");
-
-  await ctx.reply(
-    `📦 ${engine.name}\n🎮 ${session.game}\n⏳ ${days} Days\n💵 Price: ₹${product.price}\n📦 Available keys: ${count ?? 0}\n\nCheckout abhi connect nahi hai.`,
-    homeButtons()
-  );
+bot.hears('🔔 Start Notifications', async ctx => { if (!admin(ctx)) return ctx.reply('Admin only.'); const v = await getSetting('start_notifications'); await setSetting('start_notifications', v === false); await ctx.reply(`Start notifications ${v === false ? 'ON' : 'OFF'}`, ADMIN_MENU); });
+bot.hears('📣 Broadcast', ctx => { if (!admin(ctx)) return ctx.reply('Admin only.'); sessions.set(key(ctx.from.id), { flow: 'broadcast' }); return ctx.reply('Send broadcast text, or /cancel.'); });
+// Inline selection routes
+bot.action('home', async ctx => { await ctx.answerCbQuery(); await home(ctx); });
+bot.action('buyback', async ctx => { await ctx.answerCbQuery(); await beginBuy(ctx); });
+bot.action('adminback', async ctx => { await ctx.answerCbQuery(); await ctx.reply('Admin panel', ADMIN_MENU); });
+bot.action(/^(buy|stock|price|reseller):(snake|kos|aimai|shinigami)$/, async ctx => {
+  await ctx.answerCbQuery(); const [, prefix, engine] = ctx.match;
+  if (prefix !== 'buy' && !admin(ctx)) return ctx.reply('Admin only.');
+  if (prefix === 'stock') sessions.set(key(ctx.from.id), { flow: 'stock_game', engine });
+  if (prefix === 'price') sessions.set(key(ctx.from.id), { flow: 'price_game', engine });
+  if (prefix === 'reseller') { const s=sessions.get(key(ctx.from.id))||{}; sessions.set(key(ctx.from.id), {...s,flow:'reseller_game',engine}); }
+  await askGame(ctx, prefix, engine);
 });
-
-// QR photo handling
-bot.on("photo", async (ctx) => {
-  if (!isAdmin(ctx)) return;
-
-  const session = sessions.get(String(ctx.from.id));
-  if (session?.flow !== "qr") return;
-
-  const photo = ctx.message.photo.at(-1).file_id;
-  await setting("payment_qr_file_id", photo);
-  sessions.delete(String(ctx.from.id));
-
-  await ctx.reply("✅ QR saved successfully.", adminButtons());
+bot.action(/^(buy|stock|price|reseller)game:(snake|kos|aimai|shinigami):(\d+)$/, async ctx => {
+  await ctx.answerCbQuery(); const [, prefix, engine, ix] = ctx.match; if (prefix !== 'buy' && !admin(ctx)) return ctx.reply('Admin only.');
+  const game = ENGINES[engine].games[Number(ix)]; if (!game) return ctx.reply('Invalid game.');
+  const flow = prefix === 'buy' ? 'buy' : prefix === 'stock' ? 'stock' : prefix === 'price' ? 'price' : 'reseller';
+  sessions.set(key(ctx.from.id), { ...(sessions.get(key(ctx.from.id))||{}), flow, engine, game }); await askDays(ctx, prefix, engine, game);
 });
-
-// Text input workflows
-bot.on("text", async (ctx, next) => {
-  const uid = String(ctx.from.id);
-  const session = sessions.get(uid);
-
-  if (!session) return next();
-
-  if (ctx.message.text.startsWith("/cancel")) {
+bot.action(/^(buy|stock|price|reseller)day:(snake|kos|aimai|shinigami):([^:]+):(\d+)$/, async ctx => {
+  await ctx.answerCbQuery(); const [, prefix, engine, encoded, dayText] = ctx.match; if (prefix !== 'buy' && !admin(ctx)) return ctx.reply('Admin only.');
+  const game = decodeURIComponent(encoded); const days = Number(dayText); if (!ENGINES[engine].days.includes(days) || !ENGINES[engine].games.includes(game)) return ctx.reply('Invalid plan.');
+  const s = sessions.get(key(ctx.from.id)) || {}; Object.assign(s,{engine,game,days});
+  if (prefix === 'stock') { s.flow='stock_keys'; sessions.set(key(ctx.from.id),s); return ctx.reply(`Send keys, one per line: ${ENGINES[engine].name} / ${game} / ${days} days.`, BACK); }
+  if (prefix === 'price') { s.flow='price_value'; sessions.set(key(ctx.from.id),s); return ctx.reply(`Send user price in INR for ${ENGINES[engine].name} / ${game} / ${days} days.`); }
+  if (prefix === 'reseller') { s.flow='reseller_value'; sessions.set(key(ctx.from.id),s); return ctx.reply(`Send reseller price in INR for ${s.target || 'selected reseller'} / ${ENGINES[engine].name} / ${game} / ${days} days.`); }
+  const product = await getProduct(engine,game,days); if (!product) return ctx.reply('This plan is not configured yet.');
+  const count = await availableCount(product.id); if (!count) return ctx.reply('❌ Out of stock.', HOME);
+  const unitPrice = await effectivePrice(product, ctx.from.id);
+  sessions.set(key(ctx.from.id), { flow:'buy_quantity', engine, game, days, productId:product.id, price:unitPrice });
+  await ctx.reply(`${ENGINES[engine].name}\n🎮 ${game}\n⏳ ${days} days\n💵 Unit price: ${money(unitPrice)}\n📦 Available: ${count}\n\nKitni keys chahiye? Quantity number bhejein (1-${Math.min(count,20)}).`);
+});
+bot.action(/^(approve_topup|reject_topup):(\d+)$/, async ctx => {
+  await ctx.answerCbQuery(); if (!admin(ctx)) return ctx.reply('Admin only.');
+  const [, action, id] = ctx.match;
+  const { data: req, error } = await db.from('store_topups').select('*').eq('id', id).maybeSingle();
+  if (error || !req) return ctx.reply('Top-up request not found.');
+  if (req.status !== 'pending') return ctx.reply(`Request already ${req.status}.`);
+  if (action === 'approve_topup') {
+    const { error: rpcError } = await db.rpc('approve_topup_once', { p_topup_id: id, p_admin_telegram_id: ADMIN_ID });
+    if (rpcError) return ctx.reply(`Approval failed: ${rpcError.message}. Ensure SQL setup is applied.`);
+    await ctx.editMessageCaption(`${ctx.callbackQuery.message.caption || 'Top-up'}\n\n✅ APPROVED by admin ${ADMIN_ID}`).catch(()=>{});
+    await bot.telegram.sendMessage(req.telegram_id, `✅ Payment proof approved. ${money(req.amount)} added to your balance.`).catch(()=>{});
+    return ctx.reply('Top-up approved and credited.');
+  }
+  const { error: re } = await db.from('store_topups').update({ status:'rejected', reviewed_by:ADMIN_ID, reviewed_at:new Date().toISOString() }).eq('id', id).eq('status','pending');
+  if (re) return ctx.reply(`Reject failed: ${re.message}`);
+  await ctx.editMessageCaption(`${ctx.callbackQuery.message.caption || 'Top-up'}\n\n❌ REJECTED by admin ${ADMIN_ID}`).catch(()=>{});
+  await bot.telegram.sendMessage(req.telegram_id, `❌ Payment proof for ${money(req.amount)} was rejected. Please contact admin if you believe this is a mistake.`).catch(()=>{});
+  return ctx.reply('Top-up rejected.');
+});
+// Photo handling: QR setup by admin; otherwise a pending top-up proof from user.
+bot.on('photo', async ctx => {
+  try {
+    const uid = key(ctx.from.id); const s = sessions.get(uid);
+    if (admin(ctx) && s?.flow === 'set_qr') { await setSetting('payment_qr_file_id', ctx.message.photo.at(-1).file_id); sessions.delete(uid); return ctx.reply('✅ QR saved. Users can now tap Add Balance.', ADMIN_MENU); }
+    const pending = sessions.get(uid);
+    if (pending?.flow !== 'await_topup_proof') return ctx.reply('Screenshot receive nahi hua as a pending request. Pehle Add Balance se amount choose karein.');
+    const { data: row, error } = await db.from('store_topups').insert({ telegram_id: uid, amount: pending.amount, status:'pending', proof_file_id:ctx.message.photo.at(-1).file_id, user_caption:ctx.message.caption || null }).select().single();
+    if (error) throw error;
     sessions.delete(uid);
-    return ctx.reply("❌ Cancelled.", homeButtons());
-  }
-
-  if (!isAdmin(ctx)) return next();
-
-  try {
-    if (session.flow === "stock_codes") {
-      const codes = ctx.message.text
-        .split(/\r?\n/)
-        .map(v => v.trim())
-        .filter(Boolean);
-
-      if (!codes.length) return ctx.reply("❌ At least one key is required.");
-
-      const { data: product, error: productError } = await supabase
-        .from("store_products")
-        .select("id")
-        .eq("engine", session.engine)
-        .eq("game", session.game)
-        .eq("duration_days", session.days)
-        .maybeSingle();
-
-      if (productError) throw productError;
-      if (!product) {
-        return ctx.reply("❌ Set the user price for this plan first with /setprice.");
-      }
-
-      const rows = codes.map(license_key => ({
-        product_id: product.id,
-        license_key,
-      }));
-
-      const { error } = await supabase.from("store_stock").insert(rows);
-      if (error) throw error;
-
-      sessions.delete(uid);
-      return ctx.reply(`✅ ${codes.length} key(s) saved to stock.`, adminButtons());
-    }
-
-    if (session.flow === "price_value") {
-      const price = Number(ctx.message.text.trim());
-      if (!Number.isFinite(price) || price <= 0) {
-        return ctx.reply("❌ Valid INR price bhejo, jaise 199.");
-      }
-
-      const { error } = await supabase.from("store_products").upsert({
-        engine: session.engine,
-        game: session.game,
-        duration_days: session.days,
-        price,
-        active: true,
-      }, { onConflict: "engine,game,duration_days" });
-
-      if (error) throw error;
-
-      sessions.delete(uid);
-      return ctx.reply(`✅ User price saved: ₹${price}`, adminButtons());
-    }
-
-    if (session.flow === "reseller_value") {
-      const price = Number(ctx.message.text.trim());
-      if (!Number.isFinite(price) || price <= 0) {
-        return ctx.reply("❌ Valid reseller price bhejo.");
-      }
-
-      const { data: product, error: productError } = await supabase
-        .from("store_products")
-        .select("id")
-        .eq("engine", session.engine)
-        .eq("game", session.game)
-        .eq("duration_days", session.days)
-        .maybeSingle();
-
-      if (productError) throw productError;
-      if (!product) return ctx.reply("❌ Set user price for this plan first.");
-
-      const { error } = await supabase.from("store_reseller_prices").upsert({
-        telegram_id: session.target,
-        product_id: product.id,
-        price,
-      }, { onConflict: "telegram_id,product_id" });
-
-      if (error) throw error;
-
-      sessions.delete(uid);
-      return ctx.reply(
-        `✅ Reseller price saved.\nUser: ${session.target}\nPrice: ₹${price}`,
-        adminButtons()
-      );
-    }
-
-    if (session.flow === "broadcast") {
-      const message = ctx.message.text;
-      const { data: users, error } = await supabase
-        .from("store_users")
-        .select("telegram_id");
-
-      if (error) throw error;
-
-      let sent = 0;
-      for (const user of users) {
-        try {
-          await bot.telegram.sendMessage(user.telegram_id, message);
-          sent++;
-        } catch {}
-      }
-
-      sessions.delete(uid);
-      return ctx.reply(`📣 Broadcast finished. Sent: ${sent}`, adminButtons());
-    }
-  } catch (error) {
-    console.error(error);
-    await ctx.reply("❌ Save failed. Check Supabase tables and settings.");
-  }
+    await ctx.reply(`✅ Screenshot submitted. Request #${row.id} pending admin review hai. Approval ke baad balance add hoga.`, HOME);
+    await bot.telegram.sendPhoto(ADMIN_ID, ctx.message.photo.at(-1).file_id, { caption:`💳 BALANCE TOP-UP PROOF\nRequest: #${row.id}\nUser: ${uid}\nAmount: ${money(pending.amount)}\nUsername: @${ctx.from.username || 'none'}\nCaption: ${safe(ctx.message.caption || 'none')}\n\nApprove only after checking your UPI/bank statement.`, ...Markup.inlineKeyboard([[Markup.button.callback('✅ Approve & Credit', `approve_topup:${row.id}`), Markup.button.callback('❌ Reject', `reject_topup:${row.id}`)]]) });
+  } catch (e) { console.error(e); await ctx.reply('Could not save screenshot. Please try again or contact admin.'); }
 });
-
-// Error handling
-bot.catch((error) => {
-  console.error("Telegram bot error:", error);
-});
-
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(200).json({ status: "Techno Aabid Store endpoint running" });
-  }
-
+bot.on('text', async (ctx, next) => {
+  const uid = key(ctx.from.id); const text = ctx.message.text.trim(); const s = sessions.get(uid);
+  if (!s || text.startsWith('/')) return next();
+  if (text === '❌ Cancel') { sessions.delete(uid); return ctx.reply('Cancelled.', HOME); }
   try {
-    await bot.handleUpdate(req.body);
-    return res.status(200).json({ ok: true });
-  } catch (error) {
-    console.error("Webhook error:", error);
-    return res.status(500).json({ ok: false });
-  }
+    if (s.flow === 'topup_amount') {
+      const amount = Number(text.replace(/[₹,\s]/g,'')); if (!Number.isFinite(amount) || amount < 1 || amount > 10000) return ctx.reply('₹1–₹10,000 ke beech valid amount bhejein.');
+      const qr = await getSetting('payment_qr_file_id'); if (!qr) return ctx.reply('Admin ne abhi QR set nahi kiya hai.');
+      sessions.set(uid, { flow:'await_topup_proof', amount });
+      await ctx.replyWithPhoto(qr, { caption:`➕ Add Balance\nAmount: ${money(amount)}\n\nQR par payment karein. Payment ke baad isi chat mein screenshot bhejein. Admin verify karke balance credit karega. Sirf screenshot se automatic credit nahi hoga.` });
+      return;
+    }
+    if (s.flow === 'buy_quantity') {
+      const qty = Number(text); if (!Number.isInteger(qty) || qty < 1 || qty > 20) return ctx.reply('Quantity 1 se 20 ke beech whole number honi chahiye.');
+      const count = await availableCount(s.productId); if (count < qty) return ctx.reply(`Stock kam hai. Available: ${count}`);
+      const user = await ensureUser(ctx); const total = Number((s.price * qty).toFixed(2));
+      if (Number(user.balance) < total) { sessions.delete(uid); return ctx.reply(`Insufficient balance. Total ${money(total)}, balance ${money(user.balance)}. Add Balance karein.`, HOME); }
+      sessions.set(uid,{...s,flow:'confirm_purchase',qty,total});
+      return ctx.reply(`Confirm purchase?\n${ENGINES[s.engine].name}\n${s.game} • ${s.days} days\nQuantity: ${qty}\nTotal: ${money(total)}\nBalance after purchase: ${money(Number(user.balance)-total)}`, Markup.inlineKeyboard([[Markup.button.callback('✅ Confirm & Buy','purchase_confirm'),Markup.button.callback('❌ Cancel','purchase_cancel')]]));
+    }
+    if (s.flow === 'stock_keys') {
+      if (!admin(ctx)) return ctx.reply('Admin only.'); const codes = text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean); if (!codes.length) return ctx.reply('Send at least one key.');
+      let { data: p, error: pe } = await db.from('store_products').select('id').eq('engine',s.engine).eq('game',s.game).eq('duration_days',s.days).maybeSingle(); if (pe) throw pe;
+      if (!p) return ctx.reply('Set the price first, then add stock.');
+      const { error } = await db.from('store_stock').insert(codes.map(license_key=>({product_id:p.id,license_key}))); if (error) throw error;
+      sessions.delete(uid); return ctx.reply(`✅ Saved ${codes.length} key(s).`, ADMIN_MENU);
+    }
+    if (s.flow === 'price_value') {
+      if (!admin(ctx)) return ctx.reply('Admin only.'); const price = Number(text.replace(/[₹,\s]/g,'')); if (!Number.isFinite(price)||price<=0) return ctx.reply('Enter a valid price, e.g. 199.');
+      const { error } = await db.from('store_products').upsert({engine:s.engine,game:s.game,duration_days:s.days,price,active:true},{onConflict:'engine,game,duration_days'}); if (error) throw error;
+      sessions.delete(uid); return ctx.reply(`✅ Price saved: ${money(price)}`, ADMIN_MENU);
+    }
+    if (s.flow === 'reseller_value') {
+      if (!admin(ctx)) return ctx.reply('Admin only.'); const price=Number(text.replace(/[₹,\s]/g,'')); if (!Number.isFinite(price)||price<=0) return ctx.reply('Enter a valid reseller price.');
+      const { data:p,error:pe }=await db.from('store_products').select('id').eq('engine',s.engine).eq('game',s.game).eq('duration_days',s.days).maybeSingle(); if(pe) throw pe; if(!p) return ctx.reply('Set user price first.');
+      const {error}=await db.from('store_reseller_prices').upsert({telegram_id:s.target,product_id:p.id,price},{onConflict:'telegram_id,product_id'}); if(error) throw error;
+      sessions.delete(uid); return ctx.reply(`✅ Reseller price saved for ${s.target}: ${money(price)}`, ADMIN_MENU);
+    }
+    if (s.flow === 'broadcast') {
+      if (!admin(ctx)) return ctx.reply('Admin only.'); const {data:users,error}=await db.from('store_users').select('telegram_id'); if(error) throw error;
+      let sent=0; for(const u of users||[]) { try { await bot.telegram.sendMessage(u.telegram_id,text); sent++; } catch {} }
+      sessions.delete(uid); return ctx.reply(`Broadcast done. Sent: ${sent}`,ADMIN_MENU);
+    }
+  } catch (e) { console.error(e); await ctx.reply(`Operation failed. ${e.message || ''}`); }
+});
+bot.action('purchase_cancel', async ctx => { await ctx.answerCbQuery(); sessions.delete(key(ctx.from.id)); await ctx.reply('Purchase cancelled.', HOME); });
+bot.action('purchase_confirm', async ctx => {
+  await ctx.answerCbQuery(); const uid=key(ctx.from.id); const s=sessions.get(uid); if(!s || s.flow!=='confirm_purchase') return ctx.reply('Purchase session expired. Start again.');
+  try {
+    const { data, error } = await db.rpc('purchase_and_deliver', { p_telegram_id:uid, p_product_id:s.productId, p_quantity:s.qty });
+    if(error) throw error;
+    const result=Array.isArray(data)?data[0]:data;
+    if(!result?.ok) return ctx.reply(result?.message || 'Purchase failed. Please try again.');
+    sessions.delete(uid);
+    const delivered = Array.isArray(result.keys) ? result.keys : (typeof result.keys==='string' ? JSON.parse(result.keys) : []);
+    await ctx.reply(`✅ PURCHASE SUCCESSFUL\nOrder: #${result.purchase_id}\n${ENGINES[s.engine].name}\n${s.game} • ${s.days} days\nQuantity: ${s.qty}\nPaid: ${money(s.total)}\n\nYour license key(s):\n${delivered.map((k,i)=>`${i+1}. ${k}`).join('\n')}\n\nPlease keep this message safe.`, HOME);
+    await notifyAdmin(`🛒 Purchase completed\nUser: ${uid}\nOrder: #${result.purchase_id}\nPlan: ${s.engine} / ${s.game} / ${s.days} days\nQuantity: ${s.qty}\nTotal: ${money(s.total)}`);
+  } catch(e) { console.error(e); await ctx.reply(`Purchase could not be completed: ${e.message || 'database/RPC setup required'}. Balance/stock should remain unchanged if SQL RPC is configured correctly.`); }
+});
+bot.catch((err)=>console.error('Telegram bot error:',err));
+export default async function handler(req,res) {
+  if (req.method === 'GET') return res.status(200).json({status:'Techno Aabid Store webhook ready'});
+  if (req.method !== 'POST') return res.status(405).json({error:'Method not allowed'});
+  try { await bot.handleUpdate(req.body); return res.status(200).json({ok:true}); }
+  catch(e) { console.error('Webhook error',e); return res.status(500).json({ok:false}); }
 }

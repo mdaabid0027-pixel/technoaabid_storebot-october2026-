@@ -1,6 +1,13 @@
 import { Telegraf, Markup } from "telegraf";
 import { createClient } from "@supabase/supabase-js";
 
+const requiredEnv = ["BOT_TOKEN", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"];
+const missingEnv = requiredEnv.filter((name) => !process.env[name]);
+if (missingEnv.length) {
+  console.error(`Missing required environment variables: ${missingEnv.join(", ")}`);
+  throw new Error(`Missing required environment variables: ${missingEnv.join(", ")}`);
+}
+
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
 const supabase = createClient(

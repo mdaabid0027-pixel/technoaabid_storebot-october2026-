@@ -96,21 +96,22 @@ async function beginBuy(ctx) {
   await ctx.reply('🛒 Select engine:', Markup.keyboard([
     [ENGINES.snake.name, ENGINES.kos.name],
     [ENGINES.aimai.name, ENGINES.shinigami.name],
-    ['❌ Cancel Purchase', '🏠 Main Menu'],
+    ['❌ Cancel Purchase'],
   ]).resize());
 }
 function gameKeyboard(engine) {
   const games = ENGINES[engine].games;
   const rows = [];
   for (let i=0; i<games.length; i+=2) rows.push(games.slice(i,i+2));
-  rows.push(['⬅️ Back', '❌ Cancel Purchase', '🏠 Main Menu']);
+  rows.push(['❌ Cancel Purchase']);
   return Markup.keyboard(rows).resize();
 }
 function daysKeyboard(engine) {
   const days = ENGINES[engine].days.map(d => `${d} Days`);
   const rows = [];
-  for (let i=0; i<days.length; i+=3) rows.push(days.slice(i,i+3));
-  rows.push(['⬅️ Back', '❌ Cancel Purchase', '🏠 Main Menu']);
+  // Compact, balanced 2-column layout (e.g. Snake: 3/10 then 30/90).
+  for (let i=0; i<days.length; i+=2) rows.push(days.slice(i,i+2));
+  rows.push(['❌ Cancel Purchase']);
   return Markup.keyboard(rows).resize();
 }
 function resellerQuantityKeyboard(max) {
@@ -125,14 +126,14 @@ async function askGame(ctx, prefix, engine) {
   sessions.set(key(ctx.from.id), { ...(sessions.get(key(ctx.from.id)) || {}), flow: prefix, engine });
   await ctx.reply(`${e.name}\nSelect game:`, Markup.inlineKeyboard([
     ...e.games.map((g, i) => [{ text: g, callback_data: `${prefix}game:${engine}:${i}` }]),
-    [{ text: '⬅️ Back', callback_data: prefix === 'buy' ? 'buyback' : 'adminback' }, { text: '🏠 Main Menu', callback_data: 'home' }],
+    [{ text: '❌ Cancel Purchase', callback_data: 'purchase_cancel' }],
   ]));
 }
 async function askDays(ctx, prefix, engine, game) {
   const e = ENGINES[engine];
   await ctx.reply(`${game}\nSelect duration:`, Markup.inlineKeyboard([
     ...e.days.map(d => [{ text: `${d} Days`, callback_data: `${prefix}day:${engine}:${encodeURIComponent(game)}:${d}` }]),
-    [{ text: '⬅️ Back', callback_data: `${prefix}backgame:${engine}` }, { text: '🏠 Main Menu', callback_data: 'home' }],
+    [{ text: '❌ Cancel Purchase', callback_data: 'purchase_cancel' }],
   ]));
 }
 async function beginTopup(ctx) {
@@ -156,13 +157,15 @@ bot.command('setprice', async ctx => { if (!admin(ctx)) return ctx.reply('Admin 
 bot.command('addstock', async ctx => { if (!admin(ctx)) return ctx.reply('Admin only.'); await ctx.reply('Select engine:', engineKb('stock')); });
 bot.command('addbalance', async ctx => {
   if (!admin(ctx)) return ctx.reply('Admin only.');
-  const [, uid, amountText] = ctx.message.text.trim().split(/\s+/); const amount = Number(amountText);
-  if (!/^\d+$/.test(uid || '') || !Number.isFinite(amount) || amount <= 0) return ctx.reply('Use: /addbalance USER_ID AMOUNT');
+  const [, uid, amountText, ...referenceParts] = ctx.message.text.trim().split(/\s+/); const amount = Number(amountText);
+  const suppliedReference = referenceParts.join(' ').trim();
+  if (!/^\d+$/.test(uid || '') || !Number.isFinite(amount) || amount <= 0) return ctx.reply('Use: /addbalance USER_ID AMOUNT TXN\nExample: /addbalance 123456789 500 UTR12345');
   const { data: user, error } = await db.from('store_users').select('telegram_id,balance').eq('telegram_id', uid).maybeSingle();
   if (error || !user) return ctx.reply('User not found or database error. User must /start first.');
-  const { error: ue } = await db.rpc('admin_credit_balance', { p_telegram_id: uid, p_amount: amount, p_reference: `admin:${ctx.from.id}:${Date.now()}` });
+  const reference = suppliedReference || `admin:${ctx.from.id}:${Date.now()}`;
+  const { error: ue } = await db.rpc('admin_credit_balance', { p_telegram_id: uid, p_amount: amount, p_reference: reference });
   if (ue) return ctx.reply(`Credit failed: ${ue.message}. Check SQL setup.`);
-  await ctx.reply(`Added ${money(amount)} to ${uid}.`); await bot.telegram.sendMessage(uid, `💰 Admin credited ${money(amount)} to your balance.`).catch(() => {});
+  await ctx.reply(`✅ Added ${money(amount)} to ${uid}.\nReference: ${safe(reference)}`); await bot.telegram.sendMessage(uid, `💰 Admin credited ${money(amount)} to your balance.`).catch(() => {});
 });
 bot.command('addreseller', async ctx => {
   if (!admin(ctx)) return ctx.reply('Admin only.');
@@ -201,7 +204,7 @@ bot.hears('ℹ️ Help', ctx => ctx.reply('Purchase: select engine, game, durati
 bot.hears('➕ Add Stock', async ctx => { if (!admin(ctx)) return ctx.reply('Admin only.'); await ctx.reply('Select engine:', engineKb('stock')); });
 bot.hears('💵 Set Price', async ctx => { if (!admin(ctx)) return ctx.reply('Admin only.'); await ctx.reply('Select engine:', engineKb('price')); });
 bot.hears('👥 Add Reseller', ctx => admin(ctx) ? ctx.reply('Use /addreseller USER_ID') : ctx.reply('Admin only.'));
-bot.hears('💳 Add Balance to User', ctx => admin(ctx) ? ctx.reply('Use /addbalance USER_ID AMOUNT') : ctx.reply('Admin only.'));
+bot.hears('💳 Add Balance to User', ctx => admin(ctx) ? ctx.reply('Use: /addbalance USER_ID AMOUNT TXN\nExample: /addbalance 123456789 500 UTR12345\nTXN is optional; use a UTR/reference for your records.') : ctx.reply('Admin only.'));
 bot.hears('🧾 Set QR', async ctx => { if (!admin(ctx)) return ctx.reply('Admin only.'); sessions.set(key(ctx.from.id), { flow: 'set_qr' }); await ctx.reply('Send the payment QR image.'); });
 bot.hears('📊 Stats', async ctx => {
   if (!admin(ctx)) return ctx.reply('Admin only.');

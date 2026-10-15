@@ -5,6 +5,29 @@ const required = ['BOT_TOKEN', 'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'];
 const missing = required.filter((k) => !process.env[k]);
 if (missing.length) throw new Error(`Missing environment variables: ${missing.join(', ')}`);
 const bot = new Telegraf(process.env.BOT_TOKEN);
+
+// Telegram Bot API 9.4+ supports style on INLINE keyboard buttons only.
+// Reply-keyboard buttons do not support custom background colours.
+function buttonStyle(text) {
+  const t = String(text || '').toLowerCase();
+  if (/cancel|reject|delete|remove|ban|❌|🗑/.test(t)) return 'danger';
+  if (/yes,? purchase|confirm purchase|approve|add balance|all stock|save|submit|pay now|✅|🟩/.test(t)) return 'success';
+  return 'primary';
+}
+function applyInlineButtonStyles(markup) {
+  if (!markup || typeof markup !== 'object' || !Array.isArray(markup.inline_keyboard)) return markup;
+  const result = structuredClone(markup);
+  result.inline_keyboard = result.inline_keyboard.map(row => row.map(button => {
+    if (!button || typeof button !== 'object' || !button.text) return button;
+    return { ...button, style: button.style || buttonStyle(button.text) };
+  }));
+  return result;
+}
+const originalCallApi = bot.telegram.callApi.bind(bot.telegram);
+bot.telegram.callApi = (method, payload, signal) => {
+  if (payload?.reply_markup?.inline_keyboard) payload.reply_markup = applyInlineButtonStyles(payload.reply_markup);
+  return originalCallApi(method, payload, signal);
+};
 const db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
 const ADMIN_ID = String(process.env.ADMIN_ID || '5006281199');
 const NOTIFY_ID = String(process.env.NOTIFY_ID || '8519564658');
